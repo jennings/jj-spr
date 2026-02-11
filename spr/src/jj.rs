@@ -408,6 +408,42 @@ impl Jujutsu {
         })
     }
 
+    pub fn squash(&self) -> Result<()> {
+        let _ = self.run_captured_with_args([
+            "squash",
+            "--no-pager",
+            "--quiet",
+            "--use-destination-message",
+        ])?;
+
+        Ok(())
+    }
+
+    pub fn commit<M: AsRef<str>>(&self, message: M) -> Result<()> {
+        let _ = self.run_captured_with_args([
+            "commit",
+            "--quiet",
+            "--no-pager",
+            "--message",
+            message.as_ref(),
+        ])?;
+
+        Ok(())
+    }
+
+    pub fn revset_to_change_id<R: AsRef<str>>(&self, revset: R) -> Result<String> {
+        let output = self.run_captured_with_args([
+            "log",
+            "--no-graph",
+            "-r",
+            format!("exactly({}, 1)", revset.as_ref()).as_mut_str(),
+            "--template",
+            "change_id",
+        ])?;
+
+        Ok(output.trim().into())
+    }
+
     pub fn squash_copy(&self, revision: &str, onto: ChangeId) -> Result<()> {
         let _ = self.run_captured_with_args([
             "duplicate",
@@ -494,7 +530,13 @@ impl Jujutsu {
 
     pub fn rebase_branch<S: AsRef<str>>(&self, revset: S, target: ChangeId) -> Result<()> {
         std::process::Command::new("jj")
-            .args(["rebase", "-b", revset.as_ref(), "--destination", target.as_ref()])
+            .args([
+                "rebase",
+                "-b",
+                revset.as_ref(),
+                "--destination",
+                target.as_ref(),
+            ])
             .current_dir(self.repo_path.as_path())
             .status()?;
 

@@ -300,95 +300,35 @@ pub async fn stacked(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use crate::testing;
     use super::handle_revs;
     use crate::jj::ChangeId;
+    use crate::testing;
+    use std::fs;
 
-    fn amend_jujutsu_revision(repo_path: &std::path::Path, file_content: &str) {
+    fn amend_jujutsu_revision(jj: &crate::jj::Jujutsu, file_content: &str) {
         // Create a file
-        let file_path = repo_path.join("test.txt");
+        let file_path = jj
+            .git_repo
+            .workdir()
+            .expect("Failed to extract workdir from JJ handle")
+            .join("test.txt");
         fs::write(&file_path, file_content).expect("Failed to write test file");
 
-        // Create a commit using jj
-        let output = std::process::Command::new("jj")
-            .args(["squash"])
-            .current_dir(repo_path)
-            .output()
-            .expect("Failed to run jj commit");
-
-        if !output.status.success() {
-            panic!(
-                "Failed to squash jj commit: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        jj.squash().expect("Failed to squash revision");
     }
 
-    fn rebase_jj_commit(repo_path: &std::path::Path, src: ChangeId, dst: ChangeId) {
-        let output = std::process::Command::new("jj")
-            .args(["rebase", "-s", src.as_ref(), "-d", dst.as_ref()])
-            .current_dir(repo_path)
-            .output()
-            .expect("Failed to run jj rebase");
-
-        if !output.status.success() {
-            panic!(
-                "Failed to create jj rebase: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    fn new_on_jj_commit(repo_path: &std::path::Path, base: ChangeId) {
-        let output = std::process::Command::new("jj")
-            .args(["new", base.as_ref()])
-            .current_dir(repo_path)
-            .output()
-            .expect("Failed to run jj new");
-
-        if !output.status.success() {
-            panic!(
-                "Failed to create jj new: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    fn create_jujutsu_commit(
-        repo_path: &std::path::Path,
-        message: &str,
-        file_content: &str,
-    ) -> String {
+    fn create_jujutsu_commit(jj: &crate::jj::Jujutsu, message: &str, file_content: &str) -> String {
         // Create a file
-        let file_path = repo_path.join("test.txt");
+        let file_path = jj
+            .git_repo
+            .workdir()
+            .expect("Failed to extract workdir from JJ handle")
+            .join("test.txt");
         fs::write(&file_path, file_content).expect("Failed to write test file");
 
-        // Create a commit using jj
-        let output = std::process::Command::new("jj")
-            .args(["commit", "-m", message])
-            .current_dir(repo_path)
-            .output()
-            .expect("Failed to run jj commit");
-
-        if !output.status.success() {
-            panic!(
-                "Failed to create jj commit: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        // Get the change ID of the created commit
-        let output = std::process::Command::new("jj")
-            .args(["log", "--no-graph", "-r", "@-", "--template", "change_id"])
-            .current_dir(repo_path)
-            .output()
-            .expect("Failed to get change ID");
-
-        String::from_utf8(output.stdout)
-            .expect("Invalid UTF-8 in jj output")
-            .trim()
-            .to_string()
+        jj.commit(message).expect("Failed to commit revision");
+        jj.revset_to_change_id("@-")
+            .expect("Failed to get changeid of '@-'")
     }
 
     #[tokio::test]
@@ -398,14 +338,13 @@ mod tests {
             .git_repo
             .refname_to_id("HEAD")
             .expect("Failed to revparse HEAD");
-        let workdir = jj
-            .git_repo
-            .workdir()
-            .expect("Got no workdir on git/jj repo");
 
-        let rev = create_jujutsu_commit(workdir, "Test commit", "file 1");
+        let rev = create_jujutsu_commit(&jj, "Test commit", "file 1");
         let change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(rev),
+            )
             .expect("Failed to read revision");
         let _ = handle_revs(
             &testing::config::basic(),
@@ -443,14 +382,13 @@ mod tests {
             .git_repo
             .refname_to_id("HEAD")
             .expect("Failed to revparse HEAD");
-        let workdir = jj
-            .git_repo
-            .workdir()
-            .expect("Got no workdir on git/jj repo");
 
-        let rev = create_jujutsu_commit(workdir, "Test commit", "file 1");
+        let rev = create_jujutsu_commit(&jj, "Test commit", "file 1");
         let change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(rev),
+            )
             .expect("Failed to read revision");
         let _ = handle_revs(
             &testing::config::basic(),
@@ -472,7 +410,7 @@ mod tests {
             .target()
             .expect("Failed to get oid from pr branch");
 
-        amend_jujutsu_revision(workdir, "file 2");
+        amend_jujutsu_revision(&jj, "file 2");
         let _ = handle_revs(
             &testing::config::basic(),
             &jj,
@@ -528,14 +466,13 @@ mod tests {
             .git_repo
             .refname_to_id("HEAD")
             .expect("Failed to revparse HEAD");
-        let workdir = jj
-            .git_repo
-            .workdir()
-            .expect("Got no workdir on git/jj repo");
 
-        let rev = create_jujutsu_commit(workdir, "Test commit", "file 1");
+        let rev = create_jujutsu_commit(&jj, "Test commit", "file 1");
         let change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(rev),
+            )
             .expect("Failed to read revision");
         let _ = handle_revs(
             &testing::config::basic(),
@@ -557,9 +494,12 @@ mod tests {
             .target()
             .expect("Failed to get oid from pr branch");
 
-        let child_rev = create_jujutsu_commit(workdir, "Test other commit", "file other");
+        let child_rev = create_jujutsu_commit(&jj, "Test other commit", "file other");
         let child_change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(child_rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(child_rev),
+            )
             .expect("Failed to read child revision");
         let _ = handle_revs(
             &testing::config::basic(),
@@ -628,19 +568,21 @@ mod tests {
             .git_repo
             .refname_to_id("HEAD")
             .expect("Failed to revparse HEAD");
-        let workdir = jj
-            .git_repo
-            .workdir()
-            .expect("Got no workdir on git/jj repo");
 
-        let rev = create_jujutsu_commit(workdir, "Test commit", "file 1");
+        let rev = create_jujutsu_commit(&jj, "Test commit", "file 1");
         let change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(rev),
+            )
             .expect("Failed to read revision");
 
-        let child_rev = create_jujutsu_commit(workdir, "Test other commit", "file other");
+        let child_rev = create_jujutsu_commit(&jj, "Test other commit", "file other");
         let child_change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(child_rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(child_rev),
+            )
             .expect("Failed to read child revision");
         let _ = handle_revs(
             &testing::config::basic(),
@@ -684,14 +626,13 @@ mod tests {
             .git_repo
             .refname_to_id("HEAD")
             .expect("Failed to revparse HEAD");
-        let workdir = jj
-            .git_repo
-            .workdir()
-            .expect("Got no workdir on git/jj repo");
 
-        let rev = create_jujutsu_commit(workdir, "Test commit", "file 1");
+        let rev = create_jujutsu_commit(&jj, "Test commit", "file 1");
         let change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(rev),
+            )
             .expect("Failed to read revision");
         let _ = handle_revs(
             &testing::config::basic(),
@@ -716,7 +657,7 @@ mod tests {
         jj.git_repo
             .set_head_detached(trunk_oid)
             .expect("Failed to checkout trunk");
-        let _ = create_jujutsu_commit(workdir, "New head", "file 3");
+        let _ = create_jujutsu_commit(&jj, "New head", "file 3");
         let updated_trunk_oid = jj
             .git_repo
             .refname_to_id("HEAD")
@@ -790,14 +731,13 @@ mod tests {
             .git_repo
             .refname_to_id("HEAD")
             .expect("Failed to revparse HEAD");
-        let workdir = jj
-            .git_repo
-            .workdir()
-            .expect("Got no workdir on git/jj repo");
 
-        let rev = create_jujutsu_commit(workdir, "Test commit", "file 1");
+        let rev = create_jujutsu_commit(&jj, "Test commit", "file 1");
         let change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(rev.clone()))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(rev.clone()),
+            )
             .expect("Failed to read revision");
         let _ = handle_revs(
             &testing::config::basic(),
@@ -822,7 +762,7 @@ mod tests {
         jj.git_repo
             .set_head_detached(trunk_oid)
             .expect("Failed to checkout trunk");
-        let new_trunk = create_jujutsu_commit(workdir, "New head", "file 3");
+        let new_trunk = create_jujutsu_commit(&jj, "New head", "file 3");
         let updated_trunk_oid = jj
             .git_repo
             .refname_to_id("HEAD")
@@ -833,11 +773,8 @@ mod tests {
             .push(&["HEAD:refs/heads/main"], None)
             .expect("Failed to push new main");
 
-        rebase_jj_commit(
-            workdir,
-            crate::jj::ChangeId::from_str(rev),
-            crate::jj::ChangeId::from_str(new_trunk),
-        );
+        jj.rebase_branch(rev, ChangeId::from_str(new_trunk))
+            .expect("Failed to rebase revision");
 
         let _ = handle_revs(
             &testing::config::basic(),
@@ -898,19 +835,21 @@ mod tests {
             .git_repo
             .refname_to_id("HEAD")
             .expect("Failed to revparse HEAD");
-        let workdir = jj
-            .git_repo
-            .workdir()
-            .expect("Got no workdir on git/jj repo");
 
-        let rev = create_jujutsu_commit(workdir, "Test commit", "file 1");
+        let rev = create_jujutsu_commit(&jj, "Test commit", "file 1");
         let change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(rev.clone()))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(rev.clone()),
+            )
             .expect("Failed to read revision");
 
-        let child_rev = create_jujutsu_commit(workdir, "Test other commit", "file other");
+        let child_rev = create_jujutsu_commit(&jj, "Test other commit", "file other");
         let child_change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(child_rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(child_rev),
+            )
             .expect("Failed to read child revision");
         let _ = handle_revs(
             &testing::config::basic(),
@@ -931,8 +870,9 @@ mod tests {
             .target()
             .expect("Failed to get other oid from pr branch");
 
-        new_on_jj_commit(workdir, ChangeId::from_str(rev.clone()));
-        amend_jujutsu_revision(workdir, "file 2");
+        jj.new_revision(rev, None as Option<&str>, true)
+            .expect("Failed to create new revision");
+        amend_jujutsu_revision(&jj, "file 2");
         let _ = handle_revs(
             &testing::config::basic(),
             &jj,
@@ -1031,14 +971,13 @@ mod tests {
             .git_repo
             .refname_to_id("HEAD")
             .expect("Failed to revparse HEAD");
-        let workdir = jj
-            .git_repo
-            .workdir()
-            .expect("Got no workdir on git/jj repo");
 
-        let rev = create_jujutsu_commit(workdir, "Test commit", "file 1");
+        let rev = create_jujutsu_commit(&jj, "Test commit", "file 1");
         let change = jj
-            .read_revision(&testing::config::basic(), crate::jj::ChangeId::from_str(rev))
+            .read_revision(
+                &testing::config::basic(),
+                crate::jj::ChangeId::from_str(rev),
+            )
             .expect("Failed to read revision");
         let _ = handle_revs(
             &testing::config::basic(),
