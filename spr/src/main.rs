@@ -41,6 +41,11 @@ pub struct Cli {
     #[clap(long)]
     branch_prefix: Option<String>,
 
+    /// Override the trunk branch (spr.githubMasterBranch config) for this
+    /// invocation
+    #[clap(long)]
+    trunk: Option<String>,
+
     #[clap(subcommand)]
     command: Commands,
 }
@@ -138,8 +143,20 @@ pub async fn spr() -> Result<()> {
 
     let github_remote_name = get_config_value("spr.githubRemoteName", &git_config)
         .unwrap_or_else(|| "origin".to_string());
-    let github_master_branch = get_config_value("spr.githubMasterBranch", &git_config)
+    let configured_trunk = get_config_value("spr.githubMasterBranch", &git_config)
         .unwrap_or_else(|| "main".to_string());
+    let github_master_branch = if let Some(trunk) = cli.trunk {
+        output(
+            "ℹ️",
+            &format!(
+                "Using --trunk override: '{}' (instead of configured trunk branch '{}')",
+                trunk, configured_trunk
+            ),
+        )?;
+        trunk
+    } else {
+        configured_trunk
+    };
     let branch_prefix = get_config_value("spr.branchPrefix", &git_config)
         .ok_or_else(|| Error::new("spr.branchPrefix must be configured".to_string()))?;
     let require_approval = get_config_bool("spr.requireApproval", &git_config).unwrap_or(false);
