@@ -87,24 +87,12 @@ pub async fn spr() -> Result<()> {
         return commands::init::init().await;
     }
 
-    // Discover the Jujutsu repository and get the colocated Git repo
+    // Discover the Jujutsu workspace root and find its Git backend
     let current_dir = std::env::current_dir()?;
-    let repo = git2::Repository::discover(&current_dir)?;
+    let jj = jj_spr::jj::Jujutsu::new(current_dir)
+        .context("could not initialize Jujutsu backend".to_owned())?;
 
-    // Verify this is a Jujutsu repository by checking for .jj directory
-    let repo_path = repo
-        .workdir()
-        .ok_or_else(|| Error::new("Repository must have a working directory".to_string()))?
-        .to_path_buf();
-
-    let jj_dir = repo_path.join(".jj");
-    if !jj_dir.exists() {
-        return Err(Error::new(
-            "This command requires a Jujutsu repository. Run 'jj git init --colocate' to create one.".to_string()
-        ));
-    }
-
-    let git_config = repo.config()?;
+    let git_config = jj.git_repo.config()?;
 
     // Try to get config from jj first, fall back to git config
     let github_repository = match cli.github_repository {
@@ -153,9 +141,6 @@ pub async fn spr() -> Result<()> {
         require_approval,
     );
 
-    let jj = jj_spr::jj::Jujutsu::new(repo)
-        .context("could not initialize Jujutsu backend".to_owned())?;
-
     if let Commands::Format(opts) = cli.command {
         return commands::format::format(opts, &jj, &config).await;
     }
@@ -187,7 +172,11 @@ pub async fn spr() -> Result<()> {
         .default_headers(headers)
         .build()?;
 
-    let mut gh = jj_spr::github::GitHub::new(config.clone(), graphql_client.clone());
+    let mut gh = jj_spr::github::GitHub::new(
+        config.clone(),
+        jj.git_repo.path().to_owned(),
+        graphql_client.clone(),
+    );
 
     match cli.command {
         Commands::Diff(opts) => commands::diff::diff(opts, &jj, &mut gh, &config).await?,

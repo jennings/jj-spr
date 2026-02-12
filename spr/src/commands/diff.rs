@@ -108,8 +108,7 @@ pub async fn diff(
 
     let mut message_on_prompt = "".to_string();
 
-    for (prepared_commit, pull_request_task) in
-        zip(prepared_commits.iter_mut(), pull_request_tasks.into_iter())
+    for (prepared_commit, pull_request_task) in zip(prepared_commits.iter_mut(), pull_request_tasks)
     {
         if result.is_err() {
             break;
@@ -642,7 +641,7 @@ async fn diff_impl(
             })
         };
     } else {
-        let mut cmd = tokio::process::Command::new("git");
+        let mut cmd = jj.git_command();
         cmd.arg("push")
             .arg("--atomic")
             .arg("--no-verify")

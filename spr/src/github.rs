@@ -12,11 +12,15 @@ use crate::{
     error::{Error, Result, ResultExt},
     message::{MessageSection, MessageSectionsMap, build_github_body, parse_message},
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 #[derive(Clone)]
 pub struct GitHub {
     config: crate::config::Config,
+    repo_path: PathBuf,
     graphql_client: reqwest::Client,
 }
 
@@ -120,9 +124,14 @@ type GitObjectID = String;
 pub struct PullRequestMergeabilityQuery;
 
 impl GitHub {
-    pub fn new(config: crate::config::Config, graphql_client: reqwest::Client) -> Self {
+    pub fn new(
+        config: crate::config::Config,
+        repo_path: PathBuf,
+        graphql_client: reqwest::Client,
+    ) -> Self {
         Self {
             config,
+            repo_path,
             graphql_client,
         }
     }
@@ -148,8 +157,10 @@ impl GitHub {
     pub async fn get_pull_request(self, number: u64) -> Result<PullRequest> {
         let GitHub {
             config,
+            repo_path,
             graphql_client,
         } = self;
+        let repo_path = repo_path.to_str().unwrap();
 
         let variables = pull_request_query::Variables {
             name: config.repo.clone(),
@@ -185,6 +196,8 @@ impl GitHub {
         // Fetch refs from remote using git (since we're in a colocated repo)
         let _fetch_result = tokio::process::Command::new("git")
             .args([
+                "--git-dir",
+                repo_path,
                 "fetch",
                 "--no-write-fetch-head",
                 &config.remote_name,
@@ -196,7 +209,7 @@ impl GitHub {
 
         // Convert branch refs to OIDs
         let base_oid = if let Ok(output) = tokio::process::Command::new("git")
-            .args(["rev-parse", base.local()])
+            .args(["--git-dir", repo_path, "rev-parse", base.local()])
             .output()
             .await
         {
@@ -211,7 +224,7 @@ impl GitHub {
         };
 
         let head_oid = if let Ok(output) = tokio::process::Command::new("git")
-            .args(["rev-parse", head.local()])
+            .args(["--git-dir", repo_path, "rev-parse", head.local()])
             .output()
             .await
         {

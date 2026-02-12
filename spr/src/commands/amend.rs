@@ -66,7 +66,7 @@ pub async fn amend(
 
     let mut failure = false;
 
-    for (commit, pull_request) in pc.iter_mut().zip(pull_requests.into_iter()) {
+    for (commit, pull_request) in pc.iter_mut().zip(pull_requests) {
         write_commit_title(commit)?;
         if let Some(pull_request) = pull_request {
             let pull_request = pull_request.await??;
