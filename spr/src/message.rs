@@ -141,7 +141,7 @@ pub fn build_message(section_texts: &MessageSectionsMap, sections: &[MessageSect
         }
     }
 
-    result
+    result.trim().to_owned()
 }
 
 pub fn build_commit_message(section_texts: &MessageSectionsMap) -> String {
@@ -271,6 +271,32 @@ Reviewer:    a, b, c"#,
                 (MessageSection::Reviewers, "a, b, c".to_string()),
             ]
             .into()
+        );
+    }
+
+    #[test]
+    fn test_build_message_trims() {
+        assert_eq!(
+            build_message(
+                &[
+                    (MessageSection::Title, "  Hello".to_string()),
+                    (MessageSection::Summary, "Foo Bar  ".to_string())
+                ]
+                .into(),
+                &[MessageSection::Title, MessageSection::Summary]
+            ),
+            "Hello\n\nFoo Bar"
+        );
+        assert_eq!(
+            build_message(
+                &[
+                    (MessageSection::Title, "only title".to_string()),
+                    (MessageSection::Summary, "\n".to_string())
+                ]
+                .into(),
+                &[MessageSection::Summary]
+            ),
+            ""
         );
     }
 }
