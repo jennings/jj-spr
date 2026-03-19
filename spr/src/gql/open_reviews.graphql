@@ -6,7 +6,31 @@ query SearchQuery($query: String!) {
         number
         title
         url
+        isDraft
         reviewDecision
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun {
+                      name
+                      conclusion
+                      status
+                    }
+                    ... on StatusContext {
+                      context
+                      state
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

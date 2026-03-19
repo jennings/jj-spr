@@ -9,6 +9,9 @@ use crate::error::Error;
 use crate::error::Result;
 use graphql_client::{GraphQLQuery, Response};
 use reqwest;
+use tabled::Table;
+use tabled::Tabled;
+use tabled::settings::Style;
 
 #[allow(clippy::upper_case_acronyms)]
 type URI = String;
@@ -38,8 +41,19 @@ pub async fn list(graphql_client: reqwest::Client, config: &crate::config::Confi
     print_pr_info(response_body).ok_or_else(|| Error::new("unexpected error"))
 }
 
+#[derive(Tabled)]
+struct Row {
+    #[tabled(rename = "Reviews")]
+    review_status: String,
+    #[tabled(rename = "Checks")]
+    checks_status: String,
+    #[tabled(rename = "Description")]
+    description: String,
+}
+
 fn print_pr_info(response_body: Response<search_query::ResponseData>) -> Option<()> {
-    let term = console::Term::stdout();
+    let mut rows: Vec<Row> = Vec::new();
+
     for pr in response_body.data?.search.nodes? {
         let pr = match pr {
             Some(crate::commands::list::search_query::SearchQuerySearchNodes::PullRequest(pr)) => {
@@ -47,29 +61,66 @@ fn print_pr_info(response_body: Response<search_query::ResponseData>) -> Option<
             }
             _ => continue,
         };
-        let dummy: String;
-        let decision = match pr.review_decision {
+
+        let review_status = match pr.review_decision {
             Some(search_query::PullRequestReviewDecision::APPROVED) => {
-                console::style("Accepted").green()
+                console::style("Accepted").green().to_string()
             }
             Some(search_query::PullRequestReviewDecision::CHANGES_REQUESTED) => {
-                console::style("Changes Requested").red()
+                console::style("Changes Requested").red().to_string()
             }
             None | Some(search_query::PullRequestReviewDecision::REVIEW_REQUIRED) => {
-                console::style("Pending")
+                "Pending".to_string()
             }
-            Some(search_query::PullRequestReviewDecision::Other(d)) => {
-                dummy = d;
-                console::style(dummy.as_str())
+            Some(search_query::PullRequestReviewDecision::Other(d)) => d,
+        };
+
+        let checks = pr
+            .commits
+            .nodes
+            .as_ref()
+            .and_then(|nodes| nodes.last())
+            .and_then(|node| node.as_ref())
+            .and_then(|node| node.commit.status_check_rollup.as_ref())
+            .map(|rollup| &rollup.state);
+
+        let checks_status = match checks {
+            Some(search_query::StatusState::SUCCESS) => console::style("Pass").green().to_string(),
+            Some(search_query::StatusState::FAILURE | search_query::StatusState::ERROR) => {
+                console::style("Fail").red().to_string()
+            }
+            Some(search_query::StatusState::PENDING | search_query::StatusState::EXPECTED) => {
+                console::style("Pending").yellow().to_string()
+            }
+            Some(search_query::StatusState::Other(_)) | None => {
+                console::style("--").dim().to_string()
             }
         };
-        term.write_line(&format!(
-            "{} {} {}",
-            decision,
+
+        let draft_indicator = if pr.is_draft { "✏️ " } else { "📄 " };
+        let description = format!(
+            "{}{}\n{}",
+            console::style(draft_indicator).dim(),
             console::style(&pr.title).bold(),
             console::style(&pr.url).dim(),
-        ))
-        .ok()?;
+        );
+
+        rows.push(Row {
+            review_status,
+            checks_status,
+            description,
+        });
     }
+
+    if rows.is_empty() {
+        return Some(());
+    }
+
+    let mut table = Table::new(rows);
+    table.with(Style::sharp());
+
+    let term = console::Term::stdout();
+    term.write_line(&table.to_string()).ok()?;
+
     Some(())
 }
