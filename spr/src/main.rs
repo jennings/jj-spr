@@ -72,6 +72,9 @@ enum Commands {
 
     /// Close a Pull request
     Close(commands::close::CloseOptions),
+
+    /// Remove orphan SPR branches from the remote
+    Cleanup(commands::cleanup::CleanupOptions),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,32 +90,31 @@ pub async fn spr() -> Result<()> {
         return commands::init::init().await;
     }
 
-    // Discover the Jujutsu repository and get the colocated Git repo
     let current_dir = std::env::current_dir()?;
-    let repo = git2::Repository::discover(&current_dir)?;
+    let repo = jj_spr::jj::discover_git_repo(&current_dir).context(
+        "Could not find a Git repository. Please run from within a colocated Jujutsu repository."
+            .to_owned(),
+    )?;
 
-    // Verify this is a Jujutsu repository by checking for .jj directory
-    let repo_path = repo
-        .workdir()
-        .ok_or_else(|| Error::new("Repository must have a working directory".to_string()))?
-        .to_path_buf();
-
-    let jj_dir = repo_path.join(".jj");
-    if !jj_dir.exists() {
+    if !jj_spr::jj::has_jj_dir(&current_dir) {
         return Err(Error::new(
             "This command requires a Jujutsu repository. Run 'jj git init --colocate' to create one.".to_string()
         ));
     }
 
+    let git_workdir = repo
+        .workdir()
+        .ok_or_else(|| Error::new("Repository must have a working directory".to_string()))?
+        .to_path_buf();
     let git_config = repo.config()?;
 
-    // Try to get config from jj first, fall back to git config
+    // Try jj config first, fall back to git config
     let github_repository = match cli.github_repository {
         Some(v) => Ok(v),
         None => {
-            // Try jj config first
             if let Ok(output) = std::process::Command::new("jj")
                 .args(["config", "get", "spr.githubRepository"])
+                .current_dir(&current_dir)
                 .output()
             {
                 if output.status.success() {
@@ -151,9 +153,10 @@ pub async fn spr() -> Result<()> {
         github_master_branch,
         branch_prefix,
         require_approval,
+        git_workdir,
     );
 
-    let jj = jj_spr::jj::Jujutsu::new(repo)
+    let jj = jj_spr::jj::Jujutsu::new_with_workspace(repo, current_dir)
         .context("could not initialize Jujutsu backend".to_owned())?;
 
     if let Commands::Format(opts) = cli.command {
@@ -196,6 +199,7 @@ pub async fn spr() -> Result<()> {
         Commands::List => commands::list::list(graphql_client, &config).await?,
         Commands::Patch(opts) => commands::patch::patch(opts, &jj, &mut gh, &config).await?,
         Commands::Close(opts) => commands::close::close(opts, &jj, &mut gh, &config).await?,
+        Commands::Cleanup(opts) => commands::cleanup::cleanup(opts, &jj, &gh, &config).await?,
         // The following commands are executed above and return from this
         // function before it reaches this match.
         Commands::Init | Commands::Format(_) => (),

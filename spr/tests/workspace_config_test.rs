@@ -6,8 +6,8 @@
 use std::process::Command;
 use tempfile::tempdir;
 
-// Import production code for setting config
 use jj_spr::config::set_jj_config;
+use jj_spr::jj::discover_git_repo;
 
 fn create_jj_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     let temp_dir = tempdir().expect("Failed to create temp dir");
@@ -184,6 +184,47 @@ fn test_spr_commands_work_from_secondary_workspace() {
     );
 }
 
+// Secondary workspace in a separate directory tree — no .git anywhere up the tree
+#[test]
+fn test_spr_commands_work_from_isolated_secondary_workspace() {
+    let (_temp_dir, main_repo_path) = create_jj_repo();
+
+    set_config_for_test(&main_repo_path, "spr.githubRepository", "owner/repo");
+    set_config_for_test(&main_repo_path, "spr.branchPrefix", "spr/test/");
+
+    let sibling_dir = tempdir().expect("Failed to create sibling temp dir");
+    let workspace2_path = sibling_dir.path().join("isolated-ws");
+    let workspace_output = Command::new("jj")
+        .args(["workspace", "add", workspace2_path.to_str().unwrap()])
+        .current_dir(&main_repo_path)
+        .output()
+        .expect("Failed to create workspace");
+    assert!(
+        workspace_output.status.success(),
+        "Failed to create workspace: {}",
+        String::from_utf8_lossy(&workspace_output.stderr)
+    );
+
+    let spr_output = Command::new(env!("CARGO_BIN_EXE_jj-spr"))
+        .args(["list"])
+        .current_dir(&workspace2_path)
+        .output()
+        .expect("Failed to run spr list from isolated workspace");
+
+    let stderr = String::from_utf8_lossy(&spr_output.stderr);
+    let stdout = String::from_utf8_lossy(&spr_output.stdout);
+
+    assert!(
+        !stderr.contains("Could not find a Git repository")
+            && !stderr.contains("could not find a .jj directory")
+            && !stderr.contains("spr.githubRepository must be configured")
+            && !stderr.contains("spr.branchPrefix must be configured"),
+        "spr should work from isolated secondary workspace. stderr: {}, stdout: {}",
+        stderr,
+        stdout
+    );
+}
+
 #[test]
 fn test_config_set_in_workspace_is_shared() {
     let (temp_dir, main_repo_path) = create_jj_repo();
@@ -217,5 +258,132 @@ fn test_config_set_in_workspace_is_shared() {
         get_jj_config(&workspace2_path, "spr.githubRepository"),
         Some("owner/repo-from-workspace2".to_string()),
         "Config should be readable from workspace where it was set"
+    );
+}
+
+// ============================================================================
+// GIT SUBPROCESS TESTS (verifying current_dir fix for secondary workspaces)
+// ============================================================================
+
+fn create_jj_repo_with_commit() -> (tempfile::TempDir, std::path::PathBuf) {
+    let (temp_dir, path) = create_jj_repo();
+
+    // Create a file and commit it so there's a HEAD to rev-parse
+    std::fs::write(path.join("README.md"), "hello").expect("Failed to write file");
+    let output = Command::new("jj")
+        .args(["commit", "-m", "initial commit"])
+        .current_dir(&path)
+        .output()
+        .expect("Failed to commit");
+    assert!(
+        output.status.success(),
+        "Failed to commit: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    (temp_dir, path)
+}
+
+#[test]
+fn test_git_rev_parse_works_from_secondary_workspace_with_workdir() {
+    let (_temp_dir, main_repo_path) = create_jj_repo_with_commit();
+
+    let sibling_dir = tempdir().expect("Failed to create sibling temp dir");
+    let workspace2_path = sibling_dir.path().join("ws-revparse");
+    let ws_output = Command::new("jj")
+        .args(["workspace", "add", workspace2_path.to_str().unwrap()])
+        .current_dir(&main_repo_path)
+        .output()
+        .expect("Failed to create workspace");
+    assert!(
+        ws_output.status.success(),
+        "Failed to create workspace: {}",
+        String::from_utf8_lossy(&ws_output.stderr)
+    );
+
+    let repo = discover_git_repo(&workspace2_path)
+        .expect("Should discover git repo from secondary workspace");
+    let git_workdir = repo
+        .workdir()
+        .expect("repo must have workdir")
+        .to_path_buf();
+
+    // git rev-parse HEAD should succeed when using git_workdir as current_dir
+    let output = Command::new("git")
+        .current_dir(&git_workdir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to run git rev-parse");
+    assert!(
+        output.status.success(),
+        "git rev-parse should succeed with git_workdir. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let oid_str = String::from_utf8(output.stdout)
+        .expect("valid utf8")
+        .trim()
+        .to_string();
+    assert_eq!(oid_str.len(), 40, "Should be a full SHA-1 hash");
+}
+
+#[test]
+fn test_git_rev_parse_fails_from_secondary_workspace_without_workdir() {
+    let (_temp_dir, main_repo_path) = create_jj_repo_with_commit();
+
+    let sibling_dir = tempdir().expect("Failed to create sibling temp dir");
+    let workspace2_path = sibling_dir.path().join("ws-revparse-fail");
+    let ws_output = Command::new("jj")
+        .args(["workspace", "add", workspace2_path.to_str().unwrap()])
+        .current_dir(&main_repo_path)
+        .output()
+        .expect("Failed to create workspace");
+    assert!(ws_output.status.success());
+
+    // git rev-parse should FAIL when CWD is the secondary workspace (no .git)
+    let output = Command::new("git")
+        .current_dir(&workspace2_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to run git rev-parse");
+    assert!(
+        !output.status.success(),
+        "git rev-parse should fail without .git in CWD"
+    );
+}
+
+#[test]
+fn test_git_fetch_dry_run_works_from_secondary_workspace_with_workdir() {
+    let (_temp_dir, main_repo_path) = create_jj_repo_with_commit();
+
+    let sibling_dir = tempdir().expect("Failed to create sibling temp dir");
+    let workspace2_path = sibling_dir.path().join("ws-fetch");
+    let ws_output = Command::new("jj")
+        .args(["workspace", "add", workspace2_path.to_str().unwrap()])
+        .current_dir(&main_repo_path)
+        .output()
+        .expect("Failed to create workspace");
+    assert!(ws_output.status.success());
+
+    let repo = discover_git_repo(&workspace2_path)
+        .expect("Should discover git repo from secondary workspace");
+    let git_workdir = repo
+        .workdir()
+        .expect("repo must have workdir")
+        .to_path_buf();
+
+    // git fetch --dry-run should at least recognize the repo (even without a real remote)
+    // The point is it shouldn't fail with "not a git repository"
+    let output = Command::new("git")
+        .current_dir(&git_workdir)
+        .args(["fetch", "--dry-run"])
+        .output()
+        .expect("Failed to run git fetch");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("not a git repository"),
+        "git fetch should recognize the repo when using git_workdir. stderr: {}",
+        stderr
     );
 }

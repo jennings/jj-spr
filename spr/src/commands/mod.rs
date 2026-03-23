@@ -6,6 +6,7 @@
  */
 
 pub mod amend;
+pub mod cleanup;
 pub mod close;
 pub mod diff;
 pub mod format;

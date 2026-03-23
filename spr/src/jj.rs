@@ -7,7 +7,8 @@
 
 use std::{
     ffi::OsStr,
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -18,6 +19,23 @@ use crate::{
 };
 use git2::Oid;
 
+#[derive(Debug, Clone)]
+pub enum DryRunAction {
+    Create {
+        base: String,
+        head: String,
+        is_stacked: bool,
+        draft: bool,
+        reviewers: Vec<String>,
+    },
+    Update {
+        pr_number: u64,
+        base: String,
+        head: String,
+        is_stacked: bool,
+    },
+}
+
 #[derive(Debug)]
 pub struct PreparedCommit {
     pub oid: Oid,
@@ -26,6 +44,77 @@ pub struct PreparedCommit {
     pub message: MessageSectionsMap,
     pub pull_request_number: Option<u64>,
     pub message_changed: bool,
+    pub dry_run_action: Option<DryRunAction>,
+}
+
+/// Discover a git repository from a jj workspace path. Falls back to resolving
+/// through `.jj/repo` → `store/git_target` when there's no `.git` (secondary workspaces).
+pub fn discover_git_repo(workspace_path: &Path) -> Result<git2::Repository> {
+    if let Ok(repo) = git2::Repository::discover(workspace_path) {
+        return Ok(repo);
+    }
+
+    let jj_dir = find_jj_dir(workspace_path)?;
+    let repo_pointer = jj_dir.join("repo");
+    let store_path = if repo_pointer.is_file() {
+        let target = fs::read_to_string(&repo_pointer)
+            .map_err(|e| Error::new(format!("failed to read {}: {}", repo_pointer.display(), e)))?;
+        let target = PathBuf::from(target.trim());
+        // Relative paths are relative to the .jj/ directory
+        let target = if target.is_relative() {
+            jj_dir.join(target)
+        } else {
+            target
+        };
+        target.join("store")
+    } else {
+        repo_pointer.join("store")
+    };
+
+    let git_target_file = store_path.join("git_target");
+    let git_target = fs::read_to_string(&git_target_file).map_err(|e| {
+        Error::new(format!(
+            "failed to read {}: {}",
+            git_target_file.display(),
+            e
+        ))
+    })?;
+
+    let git_path = store_path.join(git_target.trim());
+    let git_path = git_path.canonicalize().map_err(|e| {
+        Error::new(format!(
+            "failed to resolve git path {}: {}",
+            git_path.display(),
+            e
+        ))
+    })?;
+
+    git2::Repository::open(&git_path).map_err(|e| {
+        Error::new(format!(
+            "failed to open git repository at {}: {}",
+            git_path.display(),
+            e
+        ))
+    })
+}
+
+pub fn has_jj_dir(start: &Path) -> bool {
+    find_jj_dir(start).is_ok()
+}
+
+fn find_jj_dir(start: &Path) -> Result<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        let jj_dir = dir.join(".jj");
+        if jj_dir.exists() {
+            return Ok(jj_dir);
+        }
+        if !dir.pop() {
+            return Err(Error::new(
+                "could not find a .jj directory in any parent".to_string(),
+            ));
+        }
+    }
 }
 
 pub struct Jujutsu {
@@ -57,6 +146,34 @@ impl Jujutsu {
             jj_bin,
             git_repo,
         })
+    }
+
+    pub fn new_with_workspace(git_repo: git2::Repository, workspace_path: PathBuf) -> Result<Self> {
+        let jj_dir = find_jj_dir(&workspace_path).map_err(|_| {
+            Error::new(
+                "This is not a Jujutsu repository. Run 'jj git init --colocate' to create one."
+                    .to_string(),
+            )
+        })?;
+        // repo_path is the workspace root (parent of .jj), not necessarily the CWD
+        let repo_path = jj_dir
+            .parent()
+            .ok_or_else(|| Error::new(format!(".jj path {} has no parent", jj_dir.display())))?
+            .to_path_buf();
+
+        let jj_bin = get_jj_bin();
+
+        Ok(Self {
+            repo_path,
+            jj_bin,
+            git_repo,
+        })
+    }
+
+    pub fn git_workdir(&self) -> &Path {
+        self.git_repo
+            .workdir()
+            .expect("git repo must have a working directory")
     }
 
     pub fn get_prepared_commit_for_revision(
@@ -279,6 +396,7 @@ impl Jujutsu {
             message,
             pull_request_number,
             message_changed: false,
+            dry_run_action: None,
         })
     }
 
@@ -365,6 +483,7 @@ mod tests {
             "main".into(),
             "spr/test/".into(),
             false,
+            std::env::temp_dir(),
         )
     }
 
@@ -600,5 +719,20 @@ mod tests {
             derived_committer_time.seconds() > original_committer_time.seconds(),
             "Derived commit committer timestamp should be newer than original"
         );
+    }
+
+    #[test]
+    fn test_new_with_workspace_from_subdirectory() -> Result<()> {
+        let (_temp_dir, repo_path) = create_jujutsu_test_repo();
+        create_jujutsu_commit(&repo_path, "Initial commit", "hello");
+
+        let subdir = repo_path.join("deep").join("nested").join("dir");
+        fs::create_dir_all(&subdir).map_err(|e| Error::new(e.to_string()))?;
+
+        let git_repo =
+            git2::Repository::discover(&subdir).map_err(|e| Error::new(e.to_string()))?;
+        let jj = Jujutsu::new_with_workspace(git_repo, subdir)?;
+        assert!(jj.repo_path.join(".jj").exists());
+        Ok(())
     }
 }

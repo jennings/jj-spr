@@ -928,6 +928,7 @@ mod tests {
             "main".into(),
             "spr/test/".into(),
             false,
+            std::env::temp_dir(),
         )
     }
 
@@ -1090,6 +1091,7 @@ mod tests {
     // Jujutsu integration tests - these test actual Jujutsu functionality
     mod jujutsu_integration {
         use super::*;
+        use crate::jj::discover_git_repo;
         use std::process::Command;
 
         fn create_jujutsu_test_repo() -> (TempDir, PathBuf) {
@@ -1348,6 +1350,31 @@ mod tests {
                     panic!("Fallback behavior should match normal behavior");
                 }
             }
+        }
+
+        #[test]
+        fn test_jujutsu_detection_from_secondary_workspace() {
+            let (_temp_dir, main_repo_path) = create_jujutsu_test_repo();
+            create_jujutsu_commit(&main_repo_path, "Initial commit", "hello");
+
+            // Sibling directory so git2::Repository::discover can't walk up to find .git
+            let sibling_parent = TempDir::new().expect("Failed to create sibling temp dir");
+            let workspace2_path = sibling_parent.path().join("secondary");
+            let output = Command::new("jj")
+                .args(["workspace", "add", workspace2_path.to_str().unwrap()])
+                .current_dir(&main_repo_path)
+                .output()
+                .expect("Failed to create secondary workspace");
+            assert!(
+                output.status.success(),
+                "Failed to create workspace: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            let git_repo = discover_git_repo(&workspace2_path)
+                .expect("Failed to discover git repo from secondary workspace");
+            let git = Git::new(git_repo).expect("Failed to create Git from secondary workspace");
+            assert!(git.jj.is_some());
         }
     }
 }

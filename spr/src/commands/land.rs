@@ -69,6 +69,7 @@ pub async fn land(
     // Fetch current master from GitHub.
     run_command(
         tokio::process::Command::new("git")
+            .current_dir(jj.git_workdir())
             .arg("fetch")
             .arg("--no-write-fetch-head")
             .arg("--")
@@ -254,6 +255,7 @@ pub async fn land(
     output("🛬", "Landed!")?;
 
     let mut remove_old_branch_child_process = tokio::process::Command::new("git")
+        .current_dir(jj.git_workdir())
         .arg("push")
         .arg("--no-verify")
         .arg("--delete")
@@ -269,6 +271,7 @@ pub async fn land(
     } else {
         Some(
             tokio::process::Command::new("git")
+                .current_dir(jj.git_workdir())
                 .arg("push")
                 .arg("--no-verify")
                 .arg("--delete")
@@ -288,6 +291,7 @@ pub async fn land(
         for i in 0..3 {
             // Fetch current master and the merge commit from GitHub.
             let git_fetch = tokio::process::Command::new("git")
+                .current_dir(jj.git_workdir())
                 .arg("fetch")
                 .arg("--no-write-fetch-head")
                 .arg("--")

@@ -71,7 +71,7 @@ pub async fn close(
         // This makes it easier to run the code to update the local commit message
         // with all the changes that the implementation makes at the end, even if
         // the implementation encounters an error or exits early.
-        result = close_impl(gh, config, prepared_commit).await;
+        result = close_impl(jj, gh, config, prepared_commit).await;
     }
 
     // This updates the commit message in the local Jujutsu repository (if it was
@@ -85,6 +85,7 @@ pub async fn close(
 }
 
 async fn close_impl(
+    jj: &crate::jj::Jujutsu,
     gh: &mut crate::github::GitHub,
     config: &crate::config::Config,
     prepared_commit: &mut PreparedCommit,
@@ -136,6 +137,7 @@ async fn close_impl(
     prepared_commit.message_changed = true;
 
     let mut remove_old_branch_child_process = tokio::process::Command::new("git")
+        .current_dir(jj.git_workdir())
         .arg("push")
         .arg("--no-verify")
         .arg("--delete")
@@ -151,6 +153,7 @@ async fn close_impl(
     } else {
         Some(
             tokio::process::Command::new("git")
+                .current_dir(jj.git_workdir())
                 .arg("push")
                 .arg("--no-verify")
                 .arg("--delete")

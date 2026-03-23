@@ -119,6 +119,14 @@ type GitObjectID = String;
 )]
 pub struct PullRequestMergeabilityQuery;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.docs.graphql",
+    query_path = "src/gql/open_pull_request_branches.graphql",
+    response_derives = "Debug"
+)]
+pub struct OpenPullRequestBranchesQuery;
+
 impl GitHub {
     pub fn new(config: crate::config::Config, graphql_client: reqwest::Client) -> Self {
         Self {
@@ -184,6 +192,7 @@ impl GitHub {
 
         // Fetch refs from remote using git (since we're in a colocated repo)
         let _fetch_result = tokio::process::Command::new("git")
+            .current_dir(&config.git_workdir)
             .args([
                 "fetch",
                 "--no-write-fetch-head",
@@ -196,6 +205,7 @@ impl GitHub {
 
         // Convert branch refs to OIDs
         let base_oid = if let Ok(output) = tokio::process::Command::new("git")
+            .current_dir(&config.git_workdir)
             .args(["rev-parse", base.local()])
             .output()
             .await
@@ -211,6 +221,7 @@ impl GitHub {
         };
 
         let head_oid = if let Ok(output) = tokio::process::Command::new("git")
+            .current_dir(&config.git_workdir)
             .args(["rev-parse", head.local()])
             .output()
             .await
@@ -452,6 +463,58 @@ impl GitHub {
                 .merge_commit
                 .and_then(|sha| git2::Oid::from_str(&sha.oid).ok()),
         })
+    }
+
+    pub async fn get_open_pr_branch_names(&self) -> Result<HashSet<String>> {
+        let mut branch_names = HashSet::new();
+        let mut after: Option<String> = None;
+
+        loop {
+            let variables = open_pull_request_branches_query::Variables {
+                owner: self.config.owner.clone(),
+                name: self.config.repo.clone(),
+                first: 100,
+                after: after.clone(),
+            };
+            let request_body = OpenPullRequestBranchesQuery::build_query(variables);
+            let res = self
+                .graphql_client
+                .post("https://api.github.com/graphql")
+                .json(&request_body)
+                .send()
+                .await?;
+            let response_body: Response<open_pull_request_branches_query::ResponseData> =
+                res.json().await?;
+
+            if let Some(errors) = response_body.errors {
+                let error = Err(Error::new("fetching open PR branches failed".to_string()));
+                return errors
+                    .into_iter()
+                    .fold(error, |err, e| err.context(e.to_string()));
+            }
+
+            let prs = response_body
+                .data
+                .ok_or_else(|| Error::new("failed to fetch open PRs"))?
+                .repository
+                .ok_or_else(|| Error::new("failed to find repository"))?
+                .pull_requests;
+
+            if let Some(nodes) = prs.nodes {
+                for node in nodes.into_iter().flatten() {
+                    branch_names.insert(node.head_ref_name);
+                    branch_names.insert(node.base_ref_name);
+                }
+            }
+
+            if prs.page_info.has_next_page {
+                after = prs.page_info.end_cursor;
+            } else {
+                break;
+            }
+        }
+
+        Ok(branch_names)
     }
 }
 

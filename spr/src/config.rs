@@ -5,7 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::collections::HashSet;
+use std::{collections::HashSet, path::PathBuf};
 
 use crate::{error::Result, github::GitHubBranch, utils::slugify};
 
@@ -17,6 +17,7 @@ pub struct Config {
     pub master_ref: GitHubBranch,
     pub branch_prefix: String,
     pub require_approval: bool,
+    pub git_workdir: PathBuf,
 }
 
 impl Config {
@@ -27,6 +28,7 @@ impl Config {
         master_branch: String,
         branch_prefix: String,
         require_approval: bool,
+        git_workdir: PathBuf,
     ) -> Self {
         let master_ref =
             GitHubBranch::new_from_branch_name(&master_branch, &remote_name, &master_branch);
@@ -37,6 +39,7 @@ impl Config {
             master_ref,
             branch_prefix,
             require_approval,
+            git_workdir,
         }
     }
 
@@ -229,6 +232,7 @@ mod tests {
             "master".into(),
             "spr/foo/".into(),
             false,
+            std::env::temp_dir(),
         )
     }
 
