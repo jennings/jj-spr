@@ -80,6 +80,11 @@
                 jujutsu
               ];
 
+              preCheck = ''
+                export HOME="$TMPDIR/home"
+                mkdir -p $HOME
+              '';
+
               meta = with pkgs.lib; {
                 description = "Jujutsu subcommand for submitting pull requests for individual, amendable, rebaseable commits to GitHub";
                 homepage = "https://github.com/LucioFranco/spr";
