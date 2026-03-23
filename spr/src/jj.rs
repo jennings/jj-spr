@@ -18,6 +18,23 @@ use crate::{
 };
 use git2::Oid;
 
+#[derive(Debug, Clone)]
+pub enum DryRunAction {
+    Create {
+        base: String,
+        head: String,
+        is_stacked: bool,
+        draft: bool,
+        reviewers: Vec<String>,
+    },
+    Update {
+        pr_number: u64,
+        base: String,
+        head: String,
+        is_stacked: bool,
+    },
+}
+
 #[derive(Debug)]
 pub struct PreparedCommit {
     pub oid: Oid,
@@ -26,6 +43,7 @@ pub struct PreparedCommit {
     pub message: MessageSectionsMap,
     pub pull_request_number: Option<u64>,
     pub message_changed: bool,
+    pub dry_run_action: Option<DryRunAction>,
 }
 
 pub struct Jujutsu {
@@ -279,6 +297,7 @@ impl Jujutsu {
             message,
             pull_request_number,
             message_changed: false,
+            dry_run_action: None,
         })
     }
 

@@ -72,6 +72,9 @@ enum Commands {
 
     /// Close a Pull request
     Close(commands::close::CloseOptions),
+
+    /// Remove orphan SPR branches from the remote
+    Cleanup(commands::cleanup::CleanupOptions),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -196,6 +199,7 @@ pub async fn spr() -> Result<()> {
         Commands::List => commands::list::list(graphql_client, &config).await?,
         Commands::Patch(opts) => commands::patch::patch(opts, &jj, &mut gh, &config).await?,
         Commands::Close(opts) => commands::close::close(opts, &jj, &mut gh, &config).await?,
+        Commands::Cleanup(opts) => commands::cleanup::cleanup(opts, &jj, &gh, &config).await?,
         // The following commands are executed above and return from this
         // function before it reaches this match.
         Commands::Init | Commands::Format(_) => (),
