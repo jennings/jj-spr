@@ -207,6 +207,10 @@ pub async fn land(
                 .send()
                 .await
                 .convert()
+                .context(format!(
+                    "squash-merging PR #{} (head {})",
+                    pull_request_number, pr_head_oid
+                ))
                 .and_then(|merge| {
                     if merge.merged {
                         Ok(merge)

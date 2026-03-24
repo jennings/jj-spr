@@ -46,8 +46,17 @@ where
     E: std::error::Error,
 {
     fn from(error: E) -> Self {
+        // Walk the error source chain so that wrapped errors (e.g.
+        // octocrab::Error::GitHub whose Display is just "GitHub") include
+        // the underlying message.
+        let mut msg = format!("{}", error);
+        let mut source = error.source();
+        while let Some(s) = source {
+            msg = format!("{}: {}", msg, s);
+            source = s.source();
+        }
         Self {
-            messages: vec![format!("{}", error)],
+            messages: vec![msg],
         }
     }
 }
@@ -159,5 +168,72 @@ pub fn add_error<T, U>(result: &mut Result<T>, other: Result<U>) -> Option<U> {
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct InnerError(String);
+
+    impl std::fmt::Display for InnerError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl std::error::Error for InnerError {}
+
+    #[derive(Debug)]
+    struct OuterError {
+        msg: String,
+        source: InnerError,
+    }
+
+    impl std::fmt::Display for OuterError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.msg)
+        }
+    }
+
+    impl std::error::Error for OuterError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    #[test]
+    fn test_from_error_includes_source_chain() {
+        let outer = OuterError {
+            msg: "GitHub".into(),
+            source: InnerError("PR is not mergeable".into()),
+        };
+        let error: Error = outer.into();
+        assert_eq!(error.messages()[0], "GitHub: PR is not mergeable");
+    }
+
+    #[test]
+    fn test_from_error_without_source() {
+        let inner = InnerError("simple error".into());
+        let error: Error = inner.into();
+        assert_eq!(error.messages()[0], "simple error");
+    }
+
+    #[test]
+    fn test_context_appends_message() {
+        let result: Result<()> = Err(Error::new("original"));
+        let result = result.context("added context".into());
+        let err = result.unwrap_err();
+        assert_eq!(err.messages(), &["original", "added context"]);
+    }
+
+    #[test]
+    fn test_reword_replaces_last_message() {
+        let result: Result<()> = Err(Error::new("original"));
+        let result = result.reword("reworded".into());
+        let err = result.unwrap_err();
+        assert_eq!(err.messages(), &["reworded"]);
     }
 }
