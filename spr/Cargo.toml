@@ -28,7 +28,7 @@ lazy-regex = "^3.4.1"
 octocrab = { version = "^0.48.0", default-features = false, features = ["rustls", "rustls-ring", "default-client"] }
 reqwest = { version = "^0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 serde = "^1.0.136"
-tabled = { version = "0.17", features = ["ansi"] }
+tabled = { version = "0.20", features = ["ansi"] }
 textwrap = "0.16.2"
 thiserror = "^2.0.17"
 tokio = { version = "^1.19.2", features = ["macros", "process", "rt-multi-thread", "time"] }
