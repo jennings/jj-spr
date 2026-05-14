@@ -19,6 +19,7 @@ pub enum MessageSection {
     Reviewers,
     ReviewedBy,
     PullRequest,
+    CherryPick,
 }
 
 pub fn message_section_label(section: &MessageSection) -> &'static str {
@@ -30,6 +31,7 @@ pub fn message_section_label(section: &MessageSection) -> &'static str {
         Reviewers => "Reviewers",
         ReviewedBy => "Reviewed By",
         PullRequest => "Pull Request",
+        CherryPick => "Cherry Pick",
     }
 }
 
@@ -43,6 +45,7 @@ pub fn message_section_by_label(label: &str) -> Option<MessageSection> {
         "reviewers" => Some(Reviewers),
         "reviewed by" => Some(ReviewedBy),
         "pull request" => Some(PullRequest),
+        "cherry pick" => Some(CherryPick),
         _ => None,
     }
 }
@@ -153,6 +156,7 @@ pub fn build_commit_message(section_texts: &MessageSectionsMap) -> String {
             MessageSection::Reviewers,
             MessageSection::ReviewedBy,
             MessageSection::PullRequest,
+            MessageSection::CherryPick,
         ],
     )
 }
@@ -271,6 +275,87 @@ Reviewer:    a, b, c"#,
                 (MessageSection::Reviewers, "a, b, c".to_string()),
             ]
             .into()
+        );
+    }
+
+    #[test]
+    fn test_parse_cherry_pick() {
+        let map = parse_message(
+            "My title\n\nPull Request: https://github.com/x/y/pull/1\nCherry Pick: true",
+            MessageSection::Title,
+        );
+        assert_eq!(
+            map.get(&MessageSection::Title).map(String::as_str),
+            Some("My title")
+        );
+        assert_eq!(
+            map.get(&MessageSection::PullRequest).map(String::as_str),
+            Some("https://github.com/x/y/pull/1")
+        );
+        assert_eq!(
+            map.get(&MessageSection::CherryPick).map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn test_build_commit_message_with_cherry_pick() {
+        let map: MessageSectionsMap = [
+            (MessageSection::Title, "My title".to_string()),
+            (
+                MessageSection::PullRequest,
+                "https://github.com/x/y/pull/1".to_string(),
+            ),
+            (MessageSection::CherryPick, "true".to_string()),
+        ]
+        .into();
+        let output = build_commit_message(&map);
+        // Cherry Pick must appear after Pull Request
+        let pr_pos = output.find("Pull Request:").unwrap();
+        let cp_pos = output.find("Cherry Pick:").unwrap();
+        assert!(
+            cp_pos > pr_pos,
+            "Cherry Pick should appear below Pull Request"
+        );
+        assert!(output.ends_with("Cherry Pick: true"));
+    }
+
+    #[test]
+    fn test_roundtrip_cherry_pick() {
+        let original = "My title\n\nPull Request: https://github.com/x/y/pull/1\nCherry Pick: true";
+        let map = parse_message(original, MessageSection::Title);
+        let rebuilt = build_commit_message(&map);
+        let reparsed = parse_message(&rebuilt, MessageSection::Title);
+        assert_eq!(
+            reparsed
+                .get(&MessageSection::CherryPick)
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            reparsed
+                .get(&MessageSection::PullRequest)
+                .map(String::as_str),
+            Some("https://github.com/x/y/pull/1")
+        );
+    }
+
+    #[test]
+    fn test_build_github_body_for_merging_omits_cherry_pick() {
+        let map: MessageSectionsMap = [
+            (MessageSection::Title, "My title".to_string()),
+            (MessageSection::Summary, "Some summary".to_string()),
+            (
+                MessageSection::PullRequest,
+                "https://github.com/x/y/pull/1".to_string(),
+            ),
+            (MessageSection::CherryPick, "true".to_string()),
+        ]
+        .into();
+        let body = build_github_body_for_merging(&map);
+        assert!(
+            !body.contains("Cherry Pick"),
+            "GitHub body should not contain Cherry Pick marker"
         );
     }
 
