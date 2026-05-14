@@ -18,12 +18,11 @@ pub async fn init() -> Result<()> {
     output("👋", "Welcome to spr!")?;
 
     let path = std::env::current_dir()?;
-    let repo = git2::Repository::discover(path.clone()).reword(formatdoc!(
-        "Could not open a Git repository in {:?}. Please run 'spr' from within \
-         a Git repository.",
-        path
+    let repo = crate::jj::Jujutsu::new(path.clone()).reword(formatdoc!(
+        "Could not find Git backend for Jujutsu repository in {:?}.",
+        &path
     ))?;
-    let config = repo.config()?;
+    let config = repo.git_repo.config()?;
 
     // GitHub Personal Access Token
 
@@ -132,7 +131,7 @@ pub async fn init() -> Result<()> {
         ),
     )?;
 
-    let url = repo.find_remote(&remote)?.url().map(String::from);
+    let url = repo.git_repo.find_remote(&remote)?.url().map(String::from);
     let regex = lazy_regex::regex!(r#"github\.com[/:]([\w\-\.]+/[\w\-\.]+?)(.git)?$"#);
     let github_repo = config
         .get_string("spr.githubRepository")
