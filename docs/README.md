@@ -110,7 +110,7 @@ You can still create bookmarks (Jujutsu's equivalent of branches) if you want, b
 
 ### Why Review Changes?
 
-The principle behind jj-spr is **one change per logical unit of work**. Each change should be able to stand on its own: it should have a coherent thesis and be a complete change in and of itself. It should have a clear summary, description, and test plan. It should leave the codebase in a consistent state: building and passing tests, etc.
+The principle behind jj-spr is **one change per logical unit of work**. Each change should be able to stand on its own: it should have a coherent thesis and be a complete change in and of itself. It should have a clear summary and description. It should leave the codebase in a consistent state: building and passing tests, etc.
 
 In addition, ideally, it shouldn't be possible to further split a change into multiple changes that each stand on their own. If you _can_ split a change that way, you should (and Jujutsu's `jj split` makes this trivial).
 

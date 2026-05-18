@@ -16,7 +16,6 @@ pub type MessageSectionsMap = std::collections::BTreeMap<MessageSection, String>
 pub enum MessageSection {
     Title,
     Summary,
-    TestPlan,
     Reviewers,
     ReviewedBy,
     PullRequest,
@@ -28,7 +27,6 @@ pub fn message_section_label(section: &MessageSection) -> &'static str {
     match section {
         Title => "Title",
         Summary => "Summary",
-        TestPlan => "Test Plan",
         Reviewers => "Reviewers",
         ReviewedBy => "Reviewed By",
         PullRequest => "Pull Request",
@@ -41,7 +39,6 @@ pub fn message_section_by_label(label: &str) -> Option<MessageSection> {
     match &label.to_ascii_lowercase()[..] {
         "title" => Some(Title),
         "summary" => Some(Summary),
-        "test plan" => Some(TestPlan),
         "reviewer" => Some(Reviewers),
         "reviewers" => Some(Reviewers),
         "reviewed by" => Some(ReviewedBy),
@@ -144,7 +141,7 @@ pub fn build_message(section_texts: &MessageSectionsMap, sections: &[MessageSect
         }
     }
 
-    result
+    result.trim().to_owned()
 }
 
 pub fn build_commit_message(section_texts: &MessageSectionsMap) -> String {
@@ -153,7 +150,6 @@ pub fn build_commit_message(section_texts: &MessageSectionsMap) -> String {
         &[
             MessageSection::Title,
             MessageSection::Summary,
-            MessageSection::TestPlan,
             MessageSection::Reviewers,
             MessageSection::ReviewedBy,
             MessageSection::PullRequest,
@@ -162,10 +158,7 @@ pub fn build_commit_message(section_texts: &MessageSectionsMap) -> String {
 }
 
 pub fn build_github_body(section_texts: &MessageSectionsMap) -> String {
-    build_message(
-        section_texts,
-        &[MessageSection::Summary, MessageSection::TestPlan],
-    )
+    build_message(section_texts, &[MessageSection::Summary])
 }
 
 pub fn build_github_body_for_merging(section_texts: &MessageSectionsMap) -> String {
@@ -173,7 +166,6 @@ pub fn build_github_body_for_merging(section_texts: &MessageSectionsMap) -> Stri
         section_texts,
         &[
             MessageSection::Summary,
-            MessageSection::TestPlan,
             MessageSection::Reviewers,
             MessageSection::ReviewedBy,
             MessageSection::PullRequest,
@@ -181,15 +173,7 @@ pub fn build_github_body_for_merging(section_texts: &MessageSectionsMap) -> Stri
     )
 }
 
-pub fn validate_commit_message(
-    message: &MessageSectionsMap,
-    config: &crate::config::Config,
-) -> Result<()> {
-    if config.require_test_plan && !message.contains_key(&MessageSection::TestPlan) {
-        output("💔", "Commit message does not have a Test Plan!")?;
-        return Err(Error::empty());
-    }
-
+pub fn validate_commit_message(message: &MessageSectionsMap) -> Result<()> {
     let title_missing_or_empty = match message.get(&MessageSection::Title) {
         None => true,
         Some(title) => title.is_empty(),
@@ -273,26 +257,46 @@ mod tests {
             parse_message(
                 r#"Hello
 
-Test plan: testzzz
-
 Summary:
 here is
 the
-summary (it's not a "Test plan:"!)
+summary
 
 Reviewer:    a, b, c"#,
                 MessageSection::Title
             ),
             [
                 (MessageSection::Title, "Hello".to_string()),
-                (
-                    MessageSection::Summary,
-                    "here is\nthe\nsummary (it's not a \"Test plan:\"!)".to_string()
-                ),
-                (MessageSection::TestPlan, "testzzz".to_string()),
+                (MessageSection::Summary, "here is\nthe\nsummary".to_string()),
                 (MessageSection::Reviewers, "a, b, c".to_string()),
             ]
             .into()
+        );
+    }
+
+    #[test]
+    fn test_build_message_trims() {
+        assert_eq!(
+            build_message(
+                &[
+                    (MessageSection::Title, "  Hello".to_string()),
+                    (MessageSection::Summary, "Foo Bar  ".to_string())
+                ]
+                .into(),
+                &[MessageSection::Title, MessageSection::Summary]
+            ),
+            "Hello\n\nFoo Bar"
+        );
+        assert_eq!(
+            build_message(
+                &[
+                    (MessageSection::Title, "only title".to_string()),
+                    (MessageSection::Summary, "\n".to_string())
+                ]
+                .into(),
+                &[MessageSection::Summary]
+            ),
+            ""
         );
     }
 }

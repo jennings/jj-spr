@@ -1,0 +1,18 @@
+[book]
+title = "Super Pull Requests"
+authors = ["Lucio Franco"]
+description = "Power tool for Jujutsu + GitHub workflows with amend-friendly single PRs and effortless stacked PRs"
+language = "en"
+src = "book/src"
+
+[build]
+build-dir = "book/book"
+
+[output.html]
+git-repository-url = "https://github.com/LucioFranco/jj-spr"
+edit-url-template = "https://github.com/LucioFranco/jj-spr/edit/main/{path}"
+site-url = "/jj-spr/"
+
+[output.html.fold]
+enable = true
+level = 0

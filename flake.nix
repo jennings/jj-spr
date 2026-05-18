@@ -55,40 +55,38 @@
           formatter = config.treefmt.build.wrapper;
           checks.formatting = config.treefmt.build.check self;
 
-          packages.default = pkgs.rustPlatform.buildRustPackage {
-            pname = "jj-spr";
-            version = "1.3.6-beta.1";
+          packages.default =
+            let
+              cargoToml = builtins.fromTOML (builtins.readFile ./spr/Cargo.toml);
+            in
+            pkgs.rustPlatform.buildRustPackage {
+              pname = cargoToml.package.name;
+              version = cargoToml.package.version;
 
-            src = ./.;
+              src = ./.;
 
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-            };
+              cargoLock = {
+                lockFile = ./Cargo.lock;
+              };
 
-            buildInputs =
-              with pkgs;
-              [
+              buildInputs = with pkgs; [
                 openssl
-                pkg-config
-              ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-                pkgs.darwin.apple_sdk.frameworks.Security
-                pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+                zlib
               ];
 
-            nativeBuildInputs = with pkgs; [
-              pkg-config
-              git
-              jujutsu
-            ];
+              nativeBuildInputs = with pkgs; [
+                pkg-config
+                git
+                jujutsu
+              ];
 
-            meta = with pkgs.lib; {
-              description = "Jujutsu subcommand for submitting pull requests for individual, amendable, rebaseable commits to GitHub";
-              homepage = "https://github.com/LucioFranco/spr";
-              license = licenses.mit;
-              maintainers = [ ];
+              meta = with pkgs.lib; {
+                description = "Jujutsu subcommand for submitting pull requests for individual, amendable, rebaseable commits to GitHub";
+                homepage = "https://github.com/LucioFranco/spr";
+                license = licenses.mit;
+                maintainers = [ ];
+              };
             };
-          };
 
           pre-commit = {
             check.enable = true;
@@ -122,6 +120,7 @@
               # Build dependencies
               openssl
               pkg-config
+              zlib
 
               # Required runtime dependencies for development and testing
               git
@@ -130,7 +129,7 @@
 
             # Environment variables for development
             RUST_SRC_PATH = "${rustToolchain.rust-src}/lib/rustlib/src/rust/library";
-            PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+            PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.zlib.dev}/lib/pkgconfig";
           };
         };
     };

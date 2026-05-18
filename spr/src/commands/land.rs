@@ -34,8 +34,6 @@ pub async fn land(
     gh: &mut crate::github::GitHub,
     config: &crate::config::Config,
 ) -> Result<()> {
-    jj.check_no_uncommitted_changes()?;
-
     let revision = opts.revision.as_deref().unwrap_or("@");
     let prepared_commit = jj.get_prepared_commit_for_revision(config, revision)?;
 
@@ -70,7 +68,7 @@ pub async fn land(
 
     // Fetch current master from GitHub.
     run_command(
-        tokio::process::Command::new("git")
+        jj.git_command()
             .arg("fetch")
             .arg("--no-write-fetch-head")
             .arg("--")
@@ -209,6 +207,10 @@ pub async fn land(
                 .send()
                 .await
                 .convert()
+                .context(format!(
+                    "squash-merging PR #{} (head {})",
+                    pull_request_number, pr_head_oid
+                ))
                 .and_then(|merge| {
                     if merge.merged {
                         Ok(merge)
@@ -251,7 +253,8 @@ pub async fn land(
 
     output("🛬", "Landed!")?;
 
-    let mut remove_old_branch_child_process = tokio::process::Command::new("git")
+    let mut remove_old_branch_child_process = jj
+        .git_command()
         .arg("push")
         .arg("--no-verify")
         .arg("--delete")
@@ -266,7 +269,7 @@ pub async fn land(
         None
     } else {
         Some(
-            tokio::process::Command::new("git")
+            jj.git_command()
                 .arg("push")
                 .arg("--no-verify")
                 .arg("--delete")
@@ -285,7 +288,8 @@ pub async fn land(
         // the merge might still not find the new commit.
         for i in 0..3 {
             // Fetch current master and the merge commit from GitHub.
-            let git_fetch = tokio::process::Command::new("git")
+            let git_fetch = jj
+                .git_command()
                 .arg("fetch")
                 .arg("--no-write-fetch-head")
                 .arg("--")

@@ -7,7 +7,7 @@
 
 use std::{
     ffi::OsStr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -18,6 +18,23 @@ use crate::{
 };
 use git2::Oid;
 
+#[derive(Debug, Clone)]
+pub enum DryRunAction {
+    Create {
+        base: String,
+        head: String,
+        is_stacked: bool,
+        draft: bool,
+        reviewers: Vec<String>,
+    },
+    Update {
+        pr_number: u64,
+        base: String,
+        head: String,
+        is_stacked: bool,
+    },
+}
+
 #[derive(Debug)]
 pub struct PreparedCommit {
     pub oid: Oid,
@@ -26,6 +43,7 @@ pub struct PreparedCommit {
     pub message: MessageSectionsMap,
     pub pull_request_number: Option<u64>,
     pub message_changed: bool,
+    pub dry_run_action: Option<DryRunAction>,
 }
 
 pub struct Jujutsu {
@@ -35,28 +53,23 @@ pub struct Jujutsu {
 }
 
 impl Jujutsu {
-    pub fn new(git_repo: git2::Repository) -> Result<Self> {
-        let repo_path = git_repo
-            .workdir()
-            .ok_or_else(|| Error::new("Repository must have a working directory".to_string()))?
-            .to_path_buf();
-
-        // Verify this is a Jujutsu repository
-        let jj_dir = repo_path.join(".jj");
-        if !jj_dir.exists() {
-            return Err(Error::new(
-                "This is not a Jujutsu repository. Run 'jj git init --colocate' to create one."
-                    .to_string(),
-            ));
-        }
-
+    pub fn new(current_path: PathBuf) -> Result<Self> {
         let jj_bin = get_jj_bin();
+        let workspace_root = discover_workspace_root(&jj_bin, &current_path)?;
+        let git_repo = find_git_repo(&workspace_root)?;
 
         Ok(Self {
-            repo_path,
+            repo_path: workspace_root,
             jj_bin,
             git_repo,
         })
+    }
+
+    pub fn git_command(&self) -> tokio::process::Command {
+        let git_repo_path = self.git_repo.path();
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("--git-dir").arg(git_repo_path);
+        cmd
     }
 
     pub fn get_prepared_commit_for_revision(
@@ -69,8 +82,11 @@ impl Jujutsu {
     }
 
     pub fn get_master_base_for_commit(&self, config: &Config, commit_oid: Oid) -> Result<Oid> {
-        // Find the merge base between the commit and master
-        let master_oid = self.resolve_revision_to_commit_id(config.master_ref.local())?;
+        // Find the merge base between the commit and master.
+        // Use git2 to resolve the ref directly rather than jj CLI, since
+        // config.master_ref.local() returns a git ref path (e.g.
+        // "refs/remotes/origin/main") which is not a valid jj revset.
+        let master_oid = self.resolve_reference(config.master_ref.local())?;
         let merge_base = self.git_repo.merge_base(commit_oid, master_oid)?;
         Ok(merge_base)
     }
@@ -162,7 +178,6 @@ impl Jujutsu {
         parent_oids: &[Oid],
     ) -> Result<Oid> {
         let original_commit = self.git_repo.find_commit(original_commit_oid)?;
-        let author = original_commit.author();
         let tree = self.git_repo.find_tree(tree_oid)?;
 
         let mut parents = Vec::new();
@@ -171,9 +186,23 @@ impl Jujutsu {
         }
         let parent_refs: Vec<_> = parents.iter().collect();
 
+        // Take the user/email from the existing commit but make a new signature which has a
+        // timestamp of now.
+        let committer = git2::Signature::now(
+            String::from_utf8_lossy(original_commit.committer().name_bytes()).as_ref(),
+            String::from_utf8_lossy(original_commit.committer().email_bytes()).as_ref(),
+        )?;
+
+        // The author signature should reference the same user as the original commit, but we set
+        // the timestamp to now, so this commit shows up in GitHub's timeline in the right place.
+        let author = git2::Signature::now(
+            String::from_utf8_lossy(original_commit.author().name_bytes()).as_ref(),
+            String::from_utf8_lossy(original_commit.author().email_bytes()).as_ref(),
+        )?;
+
         Ok(self
             .git_repo
-            .commit(None, &author, &author, message, &tree, &parent_refs)?)
+            .commit(None, &author, &committer, message, &tree, &parent_refs)?)
     }
 
     pub fn cherrypick(&self, commit_oid: Oid, onto_oid: Oid) -> Result<git2::Index> {
@@ -266,6 +295,7 @@ impl Jujutsu {
             message,
             pull_request_number,
             message_changed: false,
+            dry_run_action: None,
         })
     }
 
@@ -338,6 +368,86 @@ fn get_jj_bin() -> PathBuf {
     std::env::var_os("JJ").map_or_else(|| "jj".into(), |v| v.into())
 }
 
+/// Discover the Jujutsu workspace root from the given directory by running `jj root`.
+fn discover_workspace_root(jj_bin: &PathBuf, current_dir: &Path) -> Result<PathBuf> {
+    let output = Command::new(jj_bin)
+        .arg("root")
+        .current_dir(current_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("jj failed to spawn".to_string())?;
+
+    if output.status.success() {
+        let root = String::from_utf8(output.stdout)
+            .context("jj root output was not valid UTF-8".to_string())?;
+        Ok(PathBuf::from(root.trim()))
+    } else {
+        Err(Error::new(
+            "This command requires a Jujutsu repository. \
+                 Could not find a Jujutsu workspace in the current directory."
+                .to_string(),
+        ))
+    }
+}
+
+/// Resolve the `.jj/repo` path, handling the indirection used by non-default
+/// workspaces where `.jj/repo` is a file containing a relative path to the
+/// primary workspace's repo directory.
+fn resolve_repo_dir(workspace_root: &Path) -> Result<PathBuf> {
+    let repo_path = workspace_root.join(".jj").join("repo");
+    if repo_path.is_file() {
+        // Non-default workspace: .jj/repo is a file whose contents are a
+        // path (relative to .jj/) pointing to the actual repo directory.
+        let contents = std::fs::read(&repo_path)
+            .context("failed to read .jj/repo pointer file".to_string())?;
+        let relative = String::from_utf8(contents)
+            .context(".jj/repo pointer was not valid UTF-8".to_string())?;
+        let jj_dir = workspace_root.join(".jj");
+        jj_dir
+            .join(relative.trim())
+            .canonicalize()
+            .context("failed to resolve .jj/repo pointer".to_string())
+    } else {
+        Ok(repo_path)
+    }
+}
+
+/// Find the git2::Repository backing a Jujutsu workspace.
+///
+/// Supports colocated repos (`.git` at the workspace root), non-colocated
+/// repos (git backend inside `.jj/repo/store/`), and non-default workspaces
+/// (where `.jj/repo` is a pointer file).
+fn find_git_repo(workspace_root: &Path) -> Result<git2::Repository> {
+    // First try colocated: .git at the root
+    let dot_git = workspace_root.join(".git");
+    if dot_git.exists() {
+        return Ok(git2::Repository::open(workspace_root)?);
+    }
+
+    // Resolve .jj/repo (may be a file in non-default workspaces)
+    let repo_dir = resolve_repo_dir(workspace_root)?;
+    let store_dir = repo_dir.join("store");
+    let git_target_path = store_dir.join("git_target");
+    if git_target_path.exists() {
+        let git_target = std::fs::read_to_string(&git_target_path)
+            .context("failed to read .jj/repo/store/git_target".to_string())?;
+        let git_path = git_target.trim();
+        let git_path = if Path::new(git_path).is_absolute() {
+            PathBuf::from(git_path)
+        } else {
+            store_dir.join(git_path).canonicalize()?
+        };
+        return Ok(git2::Repository::open(&git_path)?);
+    }
+
+    Err(Error::new(
+        "Could not find Git backend for Jujutsu repository. \
+         Ensure you have a Jujutsu repository with a Git backend."
+            .to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,7 +461,6 @@ mod tests {
             "origin".into(),
             "main".into(),
             "spr/test/".into(),
-            false,
             false,
         )
     }
@@ -423,9 +532,7 @@ mod tests {
     #[test]
     fn test_jujutsu_creation() {
         let (_temp_dir, repo_path) = create_jujutsu_test_repo();
-        let git_repo = git2::Repository::open(&repo_path).expect("Failed to open git repository");
-
-        let jj = Jujutsu::new(git_repo).expect("Failed to create Jujutsu instance");
+        let jj = Jujutsu::new(repo_path.clone()).expect("Failed to create Jujutsu instance");
         assert!(jj.repo_path.exists());
         assert!(jj.repo_path.join(".jj").exists());
     }
@@ -439,8 +546,7 @@ mod tests {
         let _commit1 = create_jujutsu_commit(&repo_path, "First commit", "content1");
         let _commit2 = create_jujutsu_commit(&repo_path, "Second commit", "content2");
 
-        let git_repo = git2::Repository::open(&repo_path).expect("Failed to open git repository");
-        let jj = Jujutsu::new(git_repo).expect("Failed to create Jujutsu instance");
+        let jj = Jujutsu::new(repo_path.clone()).expect("Failed to create Jujutsu instance");
 
         // Test resolving current revision (@)
         let result = jj.get_prepared_commit_for_revision(&config, "@");
@@ -469,8 +575,7 @@ mod tests {
         let _commit2 = create_jujutsu_commit(&repo_path, "Second commit", "content2");
         let _commit3 = create_jujutsu_commit(&repo_path, "Third commit", "content3");
 
-        let git_repo = git2::Repository::open(&repo_path).expect("Failed to open git repository");
-        let jj = Jujutsu::new(git_repo).expect("Failed to create Jujutsu instance");
+        let jj = Jujutsu::new(repo_path.clone()).expect("Failed to create Jujutsu instance");
 
         // Test getting commit range
         let result = jj.get_prepared_commits_from_to(&config, "@----", "@-", false);
@@ -511,8 +616,7 @@ mod tests {
     fn test_status_check() {
         let (_temp_dir, repo_path) = create_jujutsu_test_repo();
 
-        let git_repo = git2::Repository::open(&repo_path).expect("Failed to open git repository");
-        let jj = Jujutsu::new(git_repo).expect("Failed to create Jujutsu instance");
+        let jj = Jujutsu::new(repo_path.clone()).expect("Failed to create Jujutsu instance");
 
         // Should pass since new repo has no changes
         let result = jj.check_no_uncommitted_changes();
@@ -520,6 +624,72 @@ mod tests {
             result.is_ok(),
             "Status check should pass for clean repo: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn test_derived_commit_has_different_timestamp() {
+        let (_temp_dir, repo_path) = create_jujutsu_test_repo();
+
+        // Create a commit with some content
+        let _commit1 = create_jujutsu_commit(&repo_path, "Original commit", "original content");
+
+        let jj = Jujutsu::new(repo_path.clone()).expect("Failed to create Jujutsu instance");
+
+        // Get the original commit
+        let original_commit_oid = jj
+            .resolve_revision_to_commit_id("@-")
+            .expect("Failed to resolve @- revision");
+        let original_commit = jj
+            .git_repo
+            .find_commit(original_commit_oid)
+            .expect("Failed to find original commit");
+
+        // Sleep briefly to ensure timestamp difference
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Create a derived commit
+        let tree_oid = original_commit.tree().expect("Failed to get tree").id();
+        let parent_oids = if original_commit.parents().count() > 0 {
+            vec![
+                original_commit
+                    .parent(0)
+                    .expect("Failed to get parent")
+                    .id(),
+            ]
+        } else {
+            vec![]
+        };
+
+        let derived_commit_oid = jj
+            .create_derived_commit(
+                original_commit_oid,
+                "Derived commit message",
+                tree_oid,
+                &parent_oids,
+            )
+            .expect("Failed to create derived commit");
+
+        // Get the derived commit
+        let derived_commit = jj
+            .git_repo
+            .find_commit(derived_commit_oid)
+            .expect("Failed to find derived commit");
+
+        // Verify that derived timestamps are newer than original
+        let original_author_time = original_commit.author().when();
+        let derived_author_time = derived_commit.author().when();
+        let original_committer_time = original_commit.committer().when();
+        let derived_committer_time = derived_commit.committer().when();
+
+        assert!(
+            derived_author_time.seconds() > original_author_time.seconds(),
+            "Derived commit author timestamp should be newer than original"
+        );
+
+        assert!(
+            derived_committer_time.seconds() > original_committer_time.seconds(),
+            "Derived commit committer timestamp should be newer than original"
         );
     }
 }

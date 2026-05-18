@@ -9,7 +9,7 @@ use indoc::formatdoc;
 use lazy_regex::regex;
 
 use crate::{
-    config::{AuthTokenSource, get_auth_token_with_source},
+    config::{AuthTokenSource, get_auth_token_with_source, set_jj_config},
     error::{Error, Result, ResultExt},
     output::output,
 };
@@ -18,12 +18,11 @@ pub async fn init() -> Result<()> {
     output("👋", "Welcome to spr!")?;
 
     let path = std::env::current_dir()?;
-    let repo = git2::Repository::discover(path.clone()).reword(formatdoc!(
-        "Could not open a Git repository in {:?}. Please run 'spr' from within \
-         a Git repository.",
-        path
+    let repo = crate::jj::Jujutsu::new(path.clone()).reword(formatdoc!(
+        "Could not find Git backend for Jujutsu repository in {:?}.",
+        &path
     ))?;
-    let mut config = repo.config()?;
+    let config = repo.git_repo.config()?;
 
     // GitHub Personal Access Token
 
@@ -85,7 +84,7 @@ pub async fn init() -> Result<()> {
         pat
     };
 
-    let octocrab = octocrab::OctocrabBuilder::new()
+    let octocrab = octocrab::OctocrabBuilder::default()
         .personal_token(pat.clone())
         .build()?;
     let github_user = octocrab.current().user().await?;
@@ -93,7 +92,7 @@ pub async fn init() -> Result<()> {
     output("👋", &formatdoc!("Hello {}!", github_user.login))?;
 
     if !reuse_token {
-        config.set_str("spr.githubAuthToken", pat.as_str())?;
+        set_jj_config("spr.githubAuthToken", pat.as_str(), &path)?;
     }
 
     // Name of remote
@@ -117,7 +116,7 @@ pub async fn init() -> Result<()> {
                 .unwrap_or_else(|| "origin".to_string()),
         )
         .interact_text()?;
-    config.set_str("spr.githubRemoteName", &remote)?;
+    set_jj_config("spr.githubRemoteName", &remote, &path)?;
 
     // Name of the GitHub repo
 
@@ -132,7 +131,7 @@ pub async fn init() -> Result<()> {
         ),
     )?;
 
-    let url = repo.find_remote(&remote)?.url().map(String::from);
+    let url = repo.git_repo.find_remote(&remote)?.url().map(String::from);
     let regex = lazy_regex::regex!(r#"github\.com[/:]([\w\-\.]+/[\w\-\.]+?)(.git)?$"#);
     let github_repo = config
         .get_string("spr.githubRepository")
@@ -150,21 +149,22 @@ pub async fn init() -> Result<()> {
         .with_prompt("GitHub repository")
         .with_initial_text(github_repo)
         .interact_text()?;
-    config.set_str("spr.githubRepository", &github_repo)?;
+    set_jj_config("spr.githubRepository", &github_repo, &path)?;
 
     // Master branch name (just query GitHub)
 
     let github_repo_info = octocrab
-        .get::<octocrab::models::Repository, _, _>(format!("repos/{}", &github_repo), None::<&()>)
+        .get::<octocrab::models::Repository, _, _>(format!("/repos/{}", &github_repo), None::<&()>)
         .await?;
 
-    config.set_str(
+    set_jj_config(
         "spr.githubMasterBranch",
         github_repo_info
             .default_branch
             .as_ref()
             .map(|s| &s[..])
             .unwrap_or("master"),
+        &path,
     )?;
 
     // Pull Request branch prefix
@@ -196,7 +196,7 @@ pub async fn init() -> Result<()> {
         .validate_with(|input: &String| -> Result<()> { validate_branch_prefix(input) })
         .interact_text()?;
 
-    config.set_str("spr.branchPrefix", &branch_prefix)?;
+    set_jj_config("spr.branchPrefix", &branch_prefix, &path)?;
 
     Ok(())
 }

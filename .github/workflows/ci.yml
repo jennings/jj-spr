@@ -10,37 +10,72 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check
+  test:
+    name: Test
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Install jj
+        uses: taiki-e/install-action@v2
+        with:
+          tool: jj-cli
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --all-features
+
+  fmt:
+    name: Formatting
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
-          cargo install cargo-binstall
-          cargo binstall --strategies crate-meta-data jj-cli
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: |
-          cargo fmt --all -- --check
-
       - name: Run clippy
-        run: |
-          cargo clippy --all-features --all-targets -- -D warnings
-
-      - name: Run tests
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo test
+        run: cargo clippy --all-features --all-targets -- -D warnings

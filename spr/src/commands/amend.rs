@@ -66,14 +66,14 @@ pub async fn amend(
 
     let mut failure = false;
 
-    for (commit, pull_request) in pc.iter_mut().zip(pull_requests.into_iter()) {
+    for (commit, pull_request) in pc.iter_mut().zip(pull_requests) {
         write_commit_title(commit)?;
         if let Some(pull_request) = pull_request {
             let pull_request = pull_request.await??;
             commit.message = pull_request.sections;
             commit.message_changed = true;
         }
-        failure = validate_commit_message(&commit.message, config).is_err() || failure;
+        failure = validate_commit_message(&commit.message).is_err() || failure;
     }
     jj.rewrite_commit_messages(&mut pc)?;
 

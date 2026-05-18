@@ -55,7 +55,7 @@ pub async fn format(
 
     for commit in pc.iter() {
         write_commit_title(commit)?;
-        failure = validate_commit_message(&commit.message, config).is_err() || failure;
+        failure = validate_commit_message(&commit.message).is_err() || failure;
     }
     jj.rewrite_commit_messages(&mut pc)?;
 

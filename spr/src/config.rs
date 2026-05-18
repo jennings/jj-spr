@@ -17,7 +17,6 @@ pub struct Config {
     pub master_ref: GitHubBranch,
     pub branch_prefix: String,
     pub require_approval: bool,
-    pub require_test_plan: bool,
 }
 
 impl Config {
@@ -28,7 +27,6 @@ impl Config {
         master_branch: String,
         branch_prefix: String,
         require_approval: bool,
-        require_test_plan: bool,
     ) -> Self {
         let master_ref =
             GitHubBranch::new_from_branch_name(&master_branch, &remote_name, &master_branch);
@@ -39,7 +37,6 @@ impl Config {
             master_ref,
             branch_prefix,
             require_approval,
-            require_test_plan,
         }
     }
 
@@ -200,6 +197,25 @@ pub fn get_config_bool(key: &str, git_config: &git2::Config) -> Option<bool> {
     git_config.get_bool(key).ok()
 }
 
+/// Helper function to set config value in jj (repo-level)
+pub fn set_jj_config(key: &str, value: &str, repo_path: &std::path::Path) -> Result<()> {
+    let output = std::process::Command::new("jj")
+        .args(["config", "set", "--repo", key, value])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| crate::error::Error::new(format!("Failed to execute jj config set: {}", e)))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(crate::error::Error::new(format!(
+            "jj config set failed for key '{}': {}",
+            key, stderr
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
@@ -213,8 +229,118 @@ mod tests {
             "master".into(),
             "spr/foo/".into(),
             false,
-            true,
         )
+    }
+
+    #[test]
+    fn test_set_jj_config_success() {
+        // Create a temporary jj repo for testing
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let path = temp_dir.path();
+
+        // Initialize git repo first
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to init git repo");
+
+        // Initialize jj repo (colocated)
+        let jj_init = std::process::Command::new("jj")
+            .args(["git", "init", "--colocate"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to init jj repo");
+
+        if !jj_init.status.success() {
+            // Skip test if jj is not available
+            return;
+        }
+
+        // Test setting a config value
+        let result = set_jj_config("spr.githubRepository", "test/repo", path);
+        assert!(result.is_ok(), "Should successfully set config");
+
+        // Verify the config was set
+        let output = std::process::Command::new("jj")
+            .args(["config", "get", "spr.githubRepository"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to get config");
+
+        assert!(output.status.success());
+        let value = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(value.trim(), "test/repo");
+    }
+
+    #[test]
+    fn test_set_jj_config_multiple_values() {
+        // Create a temporary jj repo for testing
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let path = temp_dir.path();
+
+        // Initialize git repo first
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to init git repo");
+
+        // Initialize jj repo (colocated)
+        let jj_init = std::process::Command::new("jj")
+            .args(["git", "init", "--colocate"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to init jj repo");
+
+        if !jj_init.status.success() {
+            // Skip test if jj is not available
+            return;
+        }
+
+        // Set multiple config values
+        assert!(set_jj_config("spr.githubRepository", "owner/repo", path).is_ok());
+        assert!(set_jj_config("spr.branchPrefix", "spr/test/", path).is_ok());
+        assert!(set_jj_config("spr.requireApproval", "false", path).is_ok());
+
+        // Verify all configs were set correctly
+        let output = std::process::Command::new("jj")
+            .args(["config", "get", "spr.githubRepository"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "owner/repo"
+        );
+
+        let output = std::process::Command::new("jj")
+            .args(["config", "get", "spr.branchPrefix"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "spr/test/"
+        );
+
+        let output = std::process::Command::new("jj")
+            .args(["config", "get", "spr.requireApproval"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "false");
+    }
+
+    #[test]
+    fn test_set_jj_config_invalid_repo() {
+        // Try to set config in a non-existent directory
+        let result = set_jj_config(
+            "spr.test",
+            "value",
+            std::path::Path::new("/nonexistent/path"),
+        );
+        assert!(result.is_err(), "Should fail for invalid repo path");
     }
 
     #[test]

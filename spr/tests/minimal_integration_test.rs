@@ -57,10 +57,7 @@ fn test_binary_exists_and_has_correct_identity() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("jj-spr"), "Should identify as jj-spr");
-    assert!(
-        stdout.contains("1.3.6-beta.1"),
-        "Should show correct version"
-    );
+    assert!(stdout.contains("0.1.0"), "Should show correct version");
 }
 
 #[test]

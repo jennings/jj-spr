@@ -1,28 +1,37 @@
-# jj-spr (Jujutsu Stacked Pull Requests)
+# Super Pull Requests (SPR)
 
-A command-line tool for submitting and updating GitHub Pull Requests from local Jujutsu changes. Built for Jujutsu's workflow of working with changes (not branches), jj-spr makes it natural to send individual changes for review and land them independently or in stacks.
+**The power tool for Jujutsu + GitHub workflows. Single PRs with amend support. Stacked PRs without the complexity.**
 
-**Key features:**
-- 📝 **Review changes, not branches**: Each Jujutsu change becomes a PR, aligned with Jujutsu's branch-free philosophy
-- 🥞 **Powerful stacking**: Create dependent PRs that can be reviewed and landed independently, with automatic rebase handling
-- 🔄 **Amend-friendly**: Update PRs by amending local changes - stable change IDs mean your PRs stay linked even through rebases
-- ⚡ **Streamlined workflow**: Simple commands that work with Jujutsu's natural change-based model
+A command-line tool that bridges Jujutsu's change-based workflow with GitHub's pull request model. Amend freely in your local repository while keeping reviewers happy with clean, incremental diffs.
 
-Designed to be run as a Jujutsu subcommand: `jj spr <command>`.
+> **⚠️ Important: Write Access Required**
+>
+> Due to GitHub API limitations, SPR requires **write access** to the repository. You must be a collaborator or have write permissions to use SPR. This is a GitHub platform constraint - the API does not support creating PRs from forks without write access to the target repository.
+>
+> If you're contributing to a project where you don't have write access, you'll need to use the standard fork + PR workflow through the GitHub web interface.
 
-## About This Fork
+## Why SPR?
 
-This project is a fork of the original [spr](https://github.com/getcord/spr) tool, specifically building upon the Jujutsu integration work started by [sunshowers](https://github.com/sunshowers).
+### For Everyone: Amend-Friendly PRs
+- **Amend freely**: Use Jujutsu's natural `jj squash` and `jj describe` workflow
+- **Review cleanly**: Reviewers see clear incremental diffs, not confusing force-push history
+- **Update naturally**: Each update creates a new commit on GitHub, preserving review context
+- **Land cleanly**: Everything squashes into one perfect commit on merge
 
-### Why This Fork Exists
+### For Power Users: Effortless Stacking
+- **Stack with confidence**: Create dependent or independent PRs with automatic rebase handling
+- **Land flexibly**: Use `--cherry-pick` to land PRs in any order
+- **Rebase trivially**: Jujutsu's stable change IDs survive rebases
+- **Review independently**: Each PR shows only its changes, not the cumulative stack
 
-This fork is a fork of a fork of [spr](https://github.com/spacedentist/spr) which was then forked by [`sunshowers`](https://github.com/sunshowers/spr).
+**The Problem SPR Solves:**
+Jujutsu encourages amending changes. GitHub's review UI breaks with force pushes. SPR bridges this gap by maintaining an append-only PR branch on GitHub while you amend freely locally.
 
-This fork continues the sunshowers fork but tries to integrate fully with jujutsu rather than be based fully on git with a few jj parts.
+## Quick Start
 
-## Installation
+### Installation
 
-### From Source
+#### From Source
 
 ```bash
 git clone https://github.com/LucioFranco/jj-spr.git
@@ -30,45 +39,33 @@ cd jj-spr
 cargo install --path spr
 ```
 
-This will install the `jj-spr` binary to your `~/.cargo/bin` directory.
+This installs the `jj-spr` binary to your `~/.cargo/bin` directory.
 
-### Setting Up as a Jujutsu Subcommand
+#### Set Up as Jujutsu Subcommand
 
-To use `jj-spr` as a Jujutsu subcommand (enabling `jj spr <command>`), add the following to your Jujutsu configuration:
-
-#### Option 1: Using `jj config set` (Recommended)
+Configure `jj spr` as a subcommand:
 
 ```bash
 jj config set --user aliases.spr '["util", "exec", "--", "jj-spr"]'
 ```
 
-#### Option 2: Manual Configuration
+<details>
+<summary>Alternative configuration methods</summary>
 
-Add this to your Jujutsu config file (`~/.jjconfig.toml` or `.jj/repo/config.toml`):
+**Manual Configuration:**
+Add to your Jujutsu config (`~/.jjconfig.toml` or `.jj/repo/config.toml`):
 
 ```toml
 [aliases]
 spr = ["util", "exec", "--", "jj-spr"]
 ```
 
-#### Option 3: Direct Binary Configuration
-
-If you prefer to configure the binary path directly:
-
+**Direct Binary Path:**
 ```toml
 [aliases]
 spr = ["util", "exec", "--", "/path/to/jj-spr"]
 ```
-
-After configuration, you can use commands like:
-```bash
-jj spr diff           # Create/update a PR for the current change
-jj spr diff -r @-     # Create/update a PR for a specific change
-jj spr land            # Land (merge) a PR
-jj spr list            # List open PRs
-```
-
-## Quickstart
+</details>
 
 ### Initial Setup
 
@@ -78,110 +75,105 @@ jj spr list            # List open PRs
    jj spr init
    ```
 
-2. **Provide your GitHub Personal Access Token** when prompted. This allows jj-spr to create and manage pull requests via the GitHub API.
+2. **Provide your GitHub Personal Access Token** when prompted.
 
 ### Basic Workflow
 
-The recommended workflow keeps you on an empty working copy (`@`) while your PR changes are at `@-`:
-
-1. **Create a change:**
-   ```bash
-   jj new main@origin
-   echo "new feature" > feature.txt
-   jj describe -m "Add new feature
-
-   Test Plan: Tested locally"
-   ```
-
-2. **Move to empty working copy:**
-   ```bash
-   jj new  # Your PR change is now at @-
-   ```
-
-3. **Submit for review:**
-   ```bash
-   jj spr diff  # Defaults to @-, your PR change
-   ```
-
-4. **Make changes and update:**
-   ```bash
-   echo "updated feature" > feature.txt
-   jj squash  # Squash changes into @-
-   jj spr diff -m "Updated implementation"
-   ```
-
-5. **Land the PR:**
-   ```bash
-   jj spr land -r @-  # Must specify @- since land defaults to @
-   ```
-
-6. **Rebase after landing:**
-   ```bash
-   jj git fetch
-   jj rebase -r @ -d main@origin
-   ```
-
-> **Key Concepts:**
-> - `@` = your working copy (where you make edits)
-> - `@-` = parent of working copy (your PR change)
-> - `jj spr diff` defaults to `@-`
-> - `jj spr land` defaults to `@`
-
-### Stacked Pull Requests
-
-jj-spr excels at handling stacked PRs for related changes:
+The recommended workflow keeps an empty working copy (`@`) with PR changes at `@-`:
 
 ```bash
-# Create first change
+# 1. Create a change
 jj new main@origin
-# ... make changes ...
-jj describe -m "Foundation change"
+echo "new feature" > feature.txt
+jj describe -m "Add new feature"
 
-# Create dependent change on top
-jj new
-# ... make changes ...
-jj describe -m "Building on foundation"
+# 2. Move to empty working copy
+jj new  # Your PR change is now at @-
 
-# Move to empty working copy
-jj new
+# 3. Submit for review
+jj spr diff  # Creates PR for @-
 
-# Create PRs for entire stack
-jj spr diff --all  # Creates PR #1 and PR #2 (stacked)
+# 4. Amend based on feedback
+echo "updated feature" > feature.txt
+jj squash  # Squash changes into @-
+jj spr diff  # Updates PR with new commit (reviewers see clean diff)
 
-# Update just the second change
-jj squash --into <change-id-of-second>
-jj spr diff -r <change-id-of-second>
+# 5. Land when approved
+jj spr land -r @-
+
+# 6. Rebase after landing
+jj git fetch
+jj rebase -r @ -d main@origin
 ```
 
-For more details on stacking, see the [documentation](./docs/user/stack.md).
+## Key Concepts
+
+- **`@`** = your working copy (where you make edits)
+- **`@-`** = parent of working copy (your PR change)
+- **`jj spr diff`** defaults to `@-` (your completed change)
+- **`jj spr land`** defaults to `@` (working copy)
+- **Change IDs** remain stable through rebases, keeping PRs linked
 
 ## Commands
 
 ### Core Commands
 
-- **`jj spr diff`** - Create or update a pull request for the current change
+- **`jj spr diff`** - Create or update a pull request
+  - Updates create new commits on GitHub (reviewers see clean diffs)
+  - Supports single changes or ranges: `-r @-`, `-r main..@`, `--all`
+  - Cherry-pick mode: `--cherry-pick` for independent PRs
+
 - **`jj spr land`** - Land (squash-merge) an approved pull request
+  - Supports cherry-pick mode for landing PRs in any order
+  - Requires manual rebase after landing (see docs)
+
 - **`jj spr list`** - List open pull requests and their status
+
 - **`jj spr close`** - Close a pull request
-- **`jj spr amend`** - Update local commit message with content from GitHub
 
-### Command Options
+- **`jj spr amend`** - Update local commit message from GitHub
 
-Most commands support revision selection:
+### Examples
+
 ```bash
-jj spr diff -r @-            # Specific revision
-jj spr diff -r main..@       # Range of revisions (like --all)
-jj spr diff -a --base trunk  # All changes from trunk to current
+# Single PR workflow
+jj spr diff                    # Create/update PR for @-
+jj spr land -r @-              # Land the PR
+
+# Stacked PRs (dependent)
+jj spr diff --all              # Create PRs for all changes
+jj spr land -r <change-id>     # Land bottom of stack
+
+# Independent PRs
+jj spr diff --cherry-pick      # Create independent PR
+jj spr land --cherry-pick -r <id>  # Land in any order
+
+# Working with specific changes
+jj spr diff -r <change-id>     # Update specific change
+jj spr diff -r main..@         # Update range of changes
 ```
 
-For detailed help on any command:
-```bash
-jj spr help <command>
-```
+## Stacked Pull Requests
+
+SPR excels at handling stacked PRs with two approaches:
+
+### Independent Changes (Recommended)
+Use `--cherry-pick` for changes that don't strictly depend on each other:
+- Land in any order
+- Simpler workflow
+- Best for most use cases
+
+### Dependent Stacks
+For true dependencies where one change requires another:
+- Automatic base branch handling
+- Changes must land in order (parent → child)
+- More complex but handles true dependencies
+
+See the [stacking documentation](./docs/user/stack.md) for detailed workflows.
 
 ## Configuration
 
-jj-spr stores configuration in your repository's git config:
+SPR stores configuration in your repository's git config:
 
 ```bash
 # Set GitHub repository (if not auto-detected)
@@ -192,48 +184,36 @@ git config spr.branchPrefix "yourname/spr/"
 
 # Require approval before landing
 git config spr.requireApproval true
-
-# Require test plan in commit messages
-git config spr.requireTestPlan true
 ```
 
 ## Requirements
 
-- **Jujutsu**: A working Jujutsu installation with a colocated Git repository
-- **GitHub Access**: A GitHub Personal Access Token with appropriate permissions
-- **Git Repository**: Your Jujutsu repository must be colocated with Git (`jj git init --colocate`)
+- **Repository Write Access**: You must have write permissions (collaborator status) on the target GitHub repository
+- **Jujutsu**: Colocated Git repository (`jj git init --colocate`)
+- **GitHub Access**: Personal Access Token with `repo` scope permissions
+- **Git**: Git binary in PATH
 
-## Differences from Original spr
+## Documentation
 
-### Jujutsu-Specific Features
+Full documentation is available at **[luciofranco.github.io/jj-spr](https://luciofranco.github.io/jj-spr/)**
 
-- **Change ID Handling**: Works with Jujutsu's change IDs instead of Git commit hashes
-- **Commit Identity Preservation**: Uses `jj describe` to maintain commit identity when updating messages
-- **Native Jujutsu Commands**: Integrates with `jj log`, `jj commit`, and other Jujutsu operations
-
-### Enhanced Stacking Support
-
-- **Fixed Parent Immutability**: Stacked changes no longer make parent commits immutable
-- **Proper Base Branches**: Correctly creates base branches for stacked PRs
-- **Clean Diffs**: GitHub shows only child changes, not cumulative diffs
-
-### Improved CLI Experience
-
-- **Per-Command Revisions**: `jj spr diff -r <rev>` instead of global revision flags
-- **Range Support**: `jj spr diff -r main..@` automatically enables multi-commit mode
-- **Better Defaults**: 
-  - `jj spr diff` defaults to `@-` (parent of working copy - your PR change)
-  - `jj spr land` defaults to `@` (working copy)
-  - Works seamlessly with the recommended empty-working-copy workflow
+Quick links:
+- [Installation](https://luciofranco.github.io/jj-spr/user/installation.html) - Detailed installation instructions
+- [Setup](https://luciofranco.github.io/jj-spr/user/setup.html) - Initial configuration
+- [Simple PR Workflow](https://luciofranco.github.io/jj-spr/user/simple.html) - Single PR workflow guide
+- [Stacked PRs](https://luciofranco.github.io/jj-spr/user/stack.html) - Multi-PR workflows and stacking
+- [Commit Messages](https://luciofranco.github.io/jj-spr/user/commit-message.html) - Message format and sections
+- [Commands Reference](https://luciofranco.github.io/jj-spr/reference/commands.html) - Complete command reference
+- [Configuration](https://luciofranco.github.io/jj-spr/reference/configuration.html) - All configuration options
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions welcome! Please:
 
-1. **Check existing issues** before starting work
-2. **Add tests** for new functionality
-3. **Follow the existing code style** (run `cargo fmt` and `cargo clippy`)
-4. **Update documentation** as needed
+1. Check existing issues before starting work
+2. Add tests for new functionality
+3. Follow existing code style (`cargo fmt` and `cargo clippy`)
+4. Update documentation as needed
 
 ### Running Tests
 
@@ -249,12 +229,13 @@ cargo clippy --all-features --all-targets
 cargo fmt --check
 ```
 
-## License
-
-This project is MIT licensed. See [LICENSE](./LICENSE) for details.
-
 ## Credits
 
+Super Pull Requests builds on the foundation of:
 - Original [spr](https://github.com/getcord/spr) by the Cord team
-- Jujutsu integration foundation by [sunshowers](https://github.com/sunshowers)
-- Jujutsu project by [martinvonz](https://github.com/martinvonz) and contributors
+- [Jujutsu integration](https://github.com/sunshowers/spr) by sunshowers
+- [Jujutsu](https://github.com/martinvonz/jj) by Martin von Zweigbergk and contributors
+
+## License
+
+MIT License - see [LICENSE](./LICENSE) for details.

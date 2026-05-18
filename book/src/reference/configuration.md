@@ -122,17 +122,11 @@ push-branch-prefix = "jj-spr/"
 label(if(current_working_copy, "bold"),
   concat(
     separate(" ",
-      label("change_id", change_id.shortest(8)),
-      label("description", if(description, description.first_line(), "(no description)")),
-      if(!immutable,
-         description.lines()
-           .filter(|d| d.match(regex:'^Pull Request: https://.+/pull/(\d+)$'))
-           .map(|d| hyperlink(
-             d.remove_prefix("Pull Request: "),
-             label("bookmark",
-               d.replace(regex:'.*/pull/(\d+)$', '#$1')
-             ))))
-    )
+      label("cyan", change_id.shortest(8)),
+      label("magenta", if(description, description.first_line(), "(no description)"))
+    ),
+    if(description.match("Pull Request: .*(#\\d+)"),
+      label("green", " " ++ description.match("Pull Request: .*(#\\d+)")))
   )
 )
 '''
