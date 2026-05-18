@@ -45,6 +45,8 @@ pub async fn list(graphql_client: reqwest::Client, config: &crate::config::Confi
 struct Row {
     #[tabled(rename = "Reviews")]
     review_status: String,
+    #[tabled(rename = "Checks")]
+    checks_status: String,
     #[tabled(rename = "Description")]
     description: String,
 }
@@ -73,14 +75,39 @@ fn print_pr_info(response_body: Response<search_query::ResponseData>) -> Option<
             Some(search_query::PullRequestReviewDecision::Other(d)) => d,
         };
 
+        let checks = pr
+            .commits
+            .nodes
+            .as_ref()
+            .and_then(|nodes| nodes.last())
+            .and_then(|node| node.as_ref())
+            .and_then(|node| node.commit.status_check_rollup.as_ref())
+            .map(|rollup| &rollup.state);
+
+        let checks_status = match checks {
+            Some(search_query::StatusState::SUCCESS) => console::style("Pass").green().to_string(),
+            Some(search_query::StatusState::FAILURE | search_query::StatusState::ERROR) => {
+                console::style("Fail").red().to_string()
+            }
+            Some(search_query::StatusState::PENDING | search_query::StatusState::EXPECTED) => {
+                console::style("Pending").yellow().to_string()
+            }
+            Some(search_query::StatusState::Other(_)) | None => {
+                console::style("--").dim().to_string()
+            }
+        };
+
+        let draft_indicator = if pr.is_draft { "✏️ " } else { "📄 " };
         let description = format!(
-            "{}\n{}",
+            "{}{}\n{}",
+            console::style(draft_indicator).dim(),
             console::style(&pr.title).bold(),
             console::style(&pr.url).dim(),
         );
 
         rows.push(Row {
             review_status,
+            checks_status,
             description,
         });
     }
