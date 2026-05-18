@@ -527,7 +527,7 @@ async fn diff_impl(
             jj.create_derived_commit(
                 local_commit.parent_oid,
                 &format!(
-                    "[spr] {}\n\nCreated using jj-spr {}\n\n[skip ci]",
+                    "[spr] {}\n\n[skip ci]",
                     if pull_request.is_some() {
                         "changes introduced through rebase".to_string()
                     } else {
@@ -536,7 +536,6 @@ async fn diff_impl(
                             config.master_ref.branch_name()
                         )
                     },
-                    env!("CARGO_PKG_VERSION"),
                 ),
                 new_base_tree,
                 &parents[..],
@@ -599,14 +598,10 @@ async fn diff_impl(
     } else {
         jj.create_derived_commit(
             local_commit.oid,
-            &format!(
-                "{}\n\nCreated using jj-spr {}",
-                github_commit_message
-                    .as_ref()
-                    .map(|s| &s[..])
-                    .unwrap_or_else(|| title),
-                env!("CARGO_PKG_VERSION"),
-            ),
+            github_commit_message
+                .as_ref()
+                .map(|s| &s[..])
+                .unwrap_or_else(|| title),
             new_head_tree,
             &pr_commit_parents[..],
         )?
