@@ -16,7 +16,7 @@ use crate::{
     config::Config,
     error::{Error, Result, ResultExt},
     github::GitHubBranch,
-    message::{MessageSection, MessageSectionsMap, build_commit_message, parse_message},
+    message::{build_commit_message, parse_message, MessageSection, MessageSectionsMap},
     utils::run_command,
 };
 use debug_ignore::DebugIgnore;
@@ -734,9 +734,9 @@ impl JujutsuRepo {
             .cli
             .convert_commits_to_jj(commits.iter().map(|c| c.oid))?;
 
-        // Use a bunch of `jj describe` operations to write out the new commit messages for each
-        // change ID.
-        for prepared_commit in commits {
+        // Iterate top-to-bottom (rev): `jj describe` rebases all descendants,
+        // invalidating their OIDs. Processing topmost first keeps unvisited OIDs stable.
+        for prepared_commit in commits.iter().rev() {
             let change_data = jj_change_data.get(&prepared_commit.oid).ok_or_else(|| {
                 Error::new(format!(
                     "commit {} did not have a corresponding change ID",
@@ -746,12 +746,8 @@ impl JujutsuRepo {
 
             let new_message = build_commit_message(&prepared_commit.message);
             if new_message != change_data.description {
-                let args = &[
-                    "describe",
-                    &change_data.change_id,
-                    "--message",
-                    &new_message,
-                ];
+                let commit_id = prepared_commit.oid.to_string();
+                let args = &["describe", "-r", &commit_id, "--message", &new_message];
                 self.cli.run_captured_with_args(args)?;
             }
         }
@@ -814,7 +810,7 @@ impl JujutsuCli {
                 ))
             })?;
 
-            let (commit_id, change_id) = first_line.split_once('\t').ok_or_else(|| {
+            let (commit_id, _change_id) = first_line.split_once('\t').ok_or_else(|| {
                 Error::new(format!(
                     "jujutsu log output chunk did not contain a tab: {}",
                     chunk
@@ -831,7 +827,6 @@ impl JujutsuCli {
             out_map.insert(
                 *commit_oid,
                 JujutsuChangeData {
-                    change_id: change_id.to_string(),
                     description: description.to_string(),
                 },
             );
@@ -906,7 +901,6 @@ impl JujutsuCli {
 }
 
 struct JujutsuChangeData {
-    change_id: String,
     description: String,
 }
 
@@ -1234,11 +1228,9 @@ mod tests {
                         "Should get exactly one commit for change ID"
                     );
                     // Verify the commit message was parsed correctly
-                    assert!(
-                        commits[0]
-                            .message
-                            .contains_key(&crate::message::MessageSection::Title)
-                    );
+                    assert!(commits[0]
+                        .message
+                        .contains_key(&crate::message::MessageSection::Title));
                 }
                 Err(e) => {
                     // Change ID resolution might fail if the format changed, but that's OK

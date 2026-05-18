@@ -14,7 +14,7 @@ use std::{
 use crate::{
     config::Config,
     error::{Error, Result, ResultExt},
-    message::{MessageSection, MessageSectionsMap, build_commit_message, parse_message},
+    message::{build_commit_message, parse_message, MessageSection, MessageSectionsMap},
 };
 use git2::Oid;
 
@@ -236,24 +236,28 @@ impl Jujutsu {
             return Ok(());
         }
 
-        // Use jj describe to update commit messages, but only for commits that actually changed
-        for prepared_commit in commits.iter_mut() {
-            // Only update commits whose messages were actually modified
+        // Iterate top-to-bottom (rev): `jj describe` rewrites the target commit and
+        // rebases all descendants, giving them new OIDs. Processing the topmost commit
+        // first avoids invalidating OIDs we haven't visited yet.
+        // We address commits by OID (not change ID) because change IDs can be
+        // divergent, and `jj describe` rejects ambiguous change IDs.
+        for prepared_commit in commits.iter_mut().rev() {
             if !prepared_commit.message_changed {
                 continue;
             }
 
             let new_message = build_commit_message(&prepared_commit.message);
-
-            // Get the change ID for this commit
-            let change_id = self.get_change_id_for_commit(prepared_commit.oid)?;
-
-            // Update the commit message using jj describe
             let mut cmd = Command::new(&self.jj_bin);
-            cmd.args(["describe", "-r", &change_id, "-m", &new_message])
-                .current_dir(&self.repo_path)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+            cmd.args([
+                "describe",
+                "-r",
+                &prepared_commit.oid.to_string(),
+                "-m",
+                &new_message,
+            ])
+            .current_dir(&self.repo_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
             let output = cmd.output()?;
             if !output.status.success() {
@@ -318,6 +322,7 @@ impl Jujutsu {
         })
     }
 
+    #[cfg(test)]
     fn get_change_id_for_commit(&self, commit_oid: Oid) -> Result<String> {
         // Get the change ID for a given commit OID
         let output = self.run_captured_with_args([
@@ -651,12 +656,10 @@ mod tests {
         // Create a derived commit
         let tree_oid = original_commit.tree().expect("Failed to get tree").id();
         let parent_oids = if original_commit.parents().count() > 0 {
-            vec![
-                original_commit
-                    .parent(0)
-                    .expect("Failed to get parent")
-                    .id(),
-            ]
+            vec![original_commit
+                .parent(0)
+                .expect("Failed to get parent")
+                .id()]
         } else {
             vec![]
         };
@@ -690,6 +693,169 @@ mod tests {
         assert!(
             derived_committer_time.seconds() > original_committer_time.seconds(),
             "Derived commit committer timestamp should be newer than original"
+        );
+    }
+
+    #[test]
+    fn rewrite_commit_messages_succeeds_with_divergent_change_id() {
+        // Validates that using OID (not change ID) avoids "ambiguous change ID" errors.
+        // given
+        let (_temp_dir, repo_path) = create_jujutsu_test_repo();
+        // Create two commits so the target commit has a parent
+        let _commit0 = create_jujutsu_commit(&repo_path, "Base commit", "base content");
+        let _commit1 = create_jujutsu_commit(&repo_path, "Original commit", "original content");
+
+        let git_repo = git2::Repository::open(&repo_path).expect("Failed to open git repository");
+        let jj = Jujutsu::new(git_repo).expect("Failed to create Jujutsu instance");
+
+        let original_oid = jj
+            .resolve_revision_to_commit_id("@-")
+            .expect("Failed to resolve @-");
+        let original_commit = jj
+            .git_repo
+            .find_commit(original_oid)
+            .expect("Failed to find original commit");
+
+        let change_id = jj
+            .get_change_id_for_commit(original_oid)
+            .expect("Failed to get change ID");
+
+        // Create a raw git commit with the same change-id header to cause divergence
+        let tree_oid = original_commit.tree().expect("Failed to get tree").id();
+        let parent_oid = original_commit
+            .parent(0)
+            .expect("Failed to get parent")
+            .id();
+
+        let raw_commit = format!(
+            "tree {tree_oid}\n\
+             parent {parent_oid}\n\
+             author Test <test@test.com> 1700000000 +0000\n\
+             committer Test <test@test.com> 1700000000 +0000\n\
+             change-id {change_id}\n\
+             \n\
+             derived commit\n"
+        );
+
+        let divergent_oid = jj
+            .git_repo
+            .odb()
+            .expect("Failed to get odb")
+            .write(git2::ObjectType::Commit, raw_commit.as_bytes())
+            .expect("Failed to write raw commit");
+
+        jj.git_repo
+            .reference(
+                "refs/heads/test-divergent",
+                divergent_oid,
+                true,
+                "create divergent ref",
+            )
+            .expect("Failed to create ref");
+
+        let import_output = std::process::Command::new("jj")
+            .args(["git", "import"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to run jj git import");
+        assert!(
+            import_output.status.success(),
+            "jj git import failed: {}",
+            String::from_utf8_lossy(&import_output.stderr)
+        );
+
+        let mut message = original_commit.message().unwrap_or("").to_string();
+        message.push_str("\nUpdated by test");
+        let parsed_message = parse_message(&message, MessageSection::Title);
+
+        let mut commits = vec![PreparedCommit {
+            oid: original_oid,
+            short_id: format!("{:.7}", original_oid),
+            parent_oid,
+            message: parsed_message,
+            pull_request_number: None,
+            message_changed: true,
+        }];
+
+        // when
+        let result = jj.rewrite_commit_messages(&mut commits);
+
+        // then
+        result.expect("rewrite_commit_messages should succeed even with divergent change ID");
+        assert!(
+            !commits[0].message_changed,
+            "message_changed flag should be reset after successful rewrite"
+        );
+    }
+
+    #[test]
+    fn stack_rewrite_updates_all_commit_messages() {
+        // Validates that reverse iteration keeps OIDs stable across a multi-commit stack.
+        // given
+        let (_temp_dir, repo_path) = create_jujutsu_test_repo();
+        let config = create_test_config();
+
+        let _c1 = create_jujutsu_commit(&repo_path, "First commit", "content1");
+        let _c2 = create_jujutsu_commit(&repo_path, "Second commit", "content2");
+        let _c3 = create_jujutsu_commit(&repo_path, "Third commit", "content3");
+
+        let git_repo = git2::Repository::open(&repo_path).expect("Failed to open git repo");
+        let jj = Jujutsu::new(git_repo).expect("Failed to create Jujutsu instance");
+
+        let mut commits = jj
+            .get_prepared_commits_from_to(&config, "root()", "@-", false)
+            .expect("Failed to get prepared commits");
+
+        assert_eq!(commits.len(), 3, "Should have 3 commits in the stack");
+
+        for (i, commit) in commits.iter_mut().enumerate() {
+            commit.message.insert(
+                MessageSection::PullRequest,
+                format!("https://github.com/test_owner/test_repo/pull/{}", i + 1),
+            );
+            commit.message_changed = true;
+        }
+
+        // when
+        jj.rewrite_commit_messages(&mut commits)
+            .expect("rewrite_commit_messages should succeed");
+
+        // then — re-resolve from the live stack, not stale OIDs
+        let bottom_desc = jj
+            .run_captured_with_args([
+                "log",
+                "--no-graph",
+                "-r",
+                "@---",
+                "--template",
+                "description",
+            ])
+            .expect("Failed to read bottom commit");
+        let middle_desc = jj
+            .run_captured_with_args([
+                "log",
+                "--no-graph",
+                "-r",
+                "@--",
+                "--template",
+                "description",
+            ])
+            .expect("Failed to read middle commit");
+        let top_desc = jj
+            .run_captured_with_args(["log", "--no-graph", "-r", "@-", "--template", "description"])
+            .expect("Failed to read top commit");
+
+        assert!(
+            bottom_desc.contains("pull/1"),
+            "Bottom commit should contain PR #1, got: {bottom_desc}"
+        );
+        assert!(
+            middle_desc.contains("pull/2"),
+            "Middle commit should contain PR #2, got: {middle_desc}"
+        );
+        assert!(
+            top_desc.contains("pull/3"),
+            "Top commit should contain PR #3, got: {top_desc}"
         );
     }
 }
