@@ -44,6 +44,12 @@ pub struct DiffOptions {
     #[clap(long)]
     cherry_pick: bool,
 
+    /// Remove the "Cherry Pick:" marker from the commit description and ignore
+    /// it for this invocation. Future `jj spr diff` invocations will behave
+    /// as though --cherry-pick was not specified.
+    #[clap(long, conflicts_with = "cherry_pick")]
+    no_cherry_pick: bool,
+
     /// Base revision for --all mode (if not specified, uses trunk)
     #[clap(long)]
     base: Option<String>,
@@ -56,6 +62,39 @@ pub struct DiffOptions {
     /// Preview what would happen without pushing or creating PRs
     #[clap(long)]
     pub dry_run: bool,
+}
+
+/// Resolve the effective cherry-pick state from CLI flags and the "Cherry Pick:"
+/// marker on the commit description.
+///
+/// When `--cherry-pick` is passed the marker is added (if absent); when
+/// `--no-cherry-pick` is passed the marker is removed (if present). Returns
+/// `(effective_cherry_pick, marker_was_changed)`.
+fn resolve_cherry_pick(
+    cherry_pick: bool,
+    no_cherry_pick: bool,
+    message: &mut crate::message::MessageSectionsMap,
+) -> (bool, bool) {
+    let stored = message
+        .get(&MessageSection::CherryPick)
+        .map(|s| s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if no_cherry_pick {
+        if stored {
+            message.remove(&MessageSection::CherryPick);
+            return (false, true);
+        }
+        (false, false)
+    } else if cherry_pick {
+        if !stored {
+            message.insert(MessageSection::CherryPick, "true".to_string());
+            return (true, true);
+        }
+        (true, false)
+    } else {
+        (stored, false)
+    }
 }
 
 pub async fn diff(
@@ -233,12 +272,18 @@ async fn diff_impl(
     // Parsed commit message of the local commit
     let message = &mut local_commit.message;
 
+    let (effective_cherry_pick, marker_changed) =
+        resolve_cherry_pick(opts.cherry_pick, opts.no_cherry_pick, message);
+    if marker_changed {
+        local_commit.message_changed = true;
+    }
+
     // Check if the local commit is based directly on the master branch.
     let directly_based_on_master = local_commit.parent_oid == master_base_oid;
 
     // Determine the trees the Pull Request branch and the base branch should
     // have when we're done here.
-    let (new_head_tree, new_base_tree) = if !opts.cherry_pick || directly_based_on_master {
+    let (new_head_tree, new_base_tree) = if !effective_cherry_pick || directly_based_on_master {
         // Unless the user tells us to --cherry-pick, these should be the trees
         // of the current commit and its parent.
         // If the current commit is directly based on master (i.e.
@@ -501,7 +546,7 @@ async fn diff_impl(
     let (pr_base_parent, base_branch) = if pr_base_tree == new_base_tree && !needs_merging_master {
         // Case 1
         (None, base_branch)
-    } else if base_branch.is_none() && (directly_based_on_master || opts.cherry_pick) {
+    } else if base_branch.is_none() && (directly_based_on_master || effective_cherry_pick) {
         // Case 2
         (Some(master_base_oid), None)
     } else {
@@ -860,6 +905,7 @@ mod tests {
             draft: false,
             message: None,
             cherry_pick: false,
+            no_cherry_pick: false,
             base: None,
             revision: None,
             dry_run: false,
@@ -881,6 +927,7 @@ mod tests {
             draft: false,
             message: None,
             cherry_pick: false,
+            no_cherry_pick: false,
             base: Some("main".to_string()),
             revision: None,
             dry_run: false,
@@ -907,6 +954,7 @@ mod tests {
             draft: false,
             message: None,
             cherry_pick: false,
+            no_cherry_pick: false,
             base: Some("main".to_string()),
             revision: None,
             dry_run: false,
@@ -921,6 +969,7 @@ mod tests {
             draft: false,
             message: None,
             cherry_pick: false,
+            no_cherry_pick: false,
             base: Some("trunk()".to_string()),
             revision: None,
             dry_run: false,
@@ -937,6 +986,7 @@ mod tests {
             draft: false,
             message: None,
             cherry_pick: false,
+            no_cherry_pick: false,
             base: Some("trunk()".to_string()),
             revision: None,
             dry_run: false,
@@ -956,6 +1006,7 @@ mod tests {
             draft: true,
             message: Some("Update message".to_string()),
             cherry_pick: false,
+            no_cherry_pick: false,
             base: Some("trunk()".to_string()),
             revision: None,
             dry_run: false,
@@ -977,6 +1028,7 @@ mod tests {
             draft: false,
             message: None,
             cherry_pick: false,
+            no_cherry_pick: false,
             base: None,
             revision: None,
             dry_run: true,
@@ -984,6 +1036,105 @@ mod tests {
 
         assert!(opts.dry_run);
         assert!(!opts.all);
+    }
+
+    // -------------------------------------------------------------------------
+    // resolve_cherry_pick unit tests
+
+    fn make_map_with_cherry_pick(value: &str) -> crate::message::MessageSectionsMap {
+        [(
+            crate::message::MessageSection::CherryPick,
+            value.to_string(),
+        )]
+        .into()
+    }
+
+    #[test]
+    fn test_resolve_cherry_pick_default_no_marker() {
+        let mut map = crate::message::MessageSectionsMap::new();
+        let (effective, changed) = resolve_cherry_pick(false, false, &mut map);
+        assert!(!effective);
+        assert!(!changed);
+        assert!(!map.contains_key(&crate::message::MessageSection::CherryPick));
+    }
+
+    #[test]
+    fn test_resolve_cherry_pick_default_with_marker() {
+        let mut map = make_map_with_cherry_pick("true");
+        let (effective, changed) = resolve_cherry_pick(false, false, &mut map);
+        assert!(effective);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn test_resolve_cherry_pick_marker_case_insensitive() {
+        let mut map = make_map_with_cherry_pick("TRUE");
+        let (effective, _) = resolve_cherry_pick(false, false, &mut map);
+        assert!(effective);
+    }
+
+    #[test]
+    fn test_resolve_cherry_pick_marker_other_value() {
+        for value in &["false", "yes", "1", ""] {
+            let mut map = make_map_with_cherry_pick(value);
+            let (effective, _) = resolve_cherry_pick(false, false, &mut map);
+            assert!(!effective, "Expected false for marker value {:?}", value);
+        }
+    }
+
+    #[test]
+    fn test_resolve_cherry_pick_flag_inserts_marker() {
+        let mut map = crate::message::MessageSectionsMap::new();
+        let (effective, changed) = resolve_cherry_pick(true, false, &mut map);
+        assert!(effective);
+        assert!(changed);
+        assert_eq!(
+            map.get(&crate::message::MessageSection::CherryPick)
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn test_resolve_cherry_pick_flag_idempotent() {
+        let mut map = make_map_with_cherry_pick("true");
+        let (effective, changed) = resolve_cherry_pick(true, false, &mut map);
+        assert!(effective);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn test_resolve_cherry_pick_no_flag_removes_marker() {
+        let mut map = make_map_with_cherry_pick("true");
+        let (effective, changed) = resolve_cherry_pick(false, true, &mut map);
+        assert!(!effective);
+        assert!(changed);
+        assert!(!map.contains_key(&crate::message::MessageSection::CherryPick));
+    }
+
+    #[test]
+    fn test_resolve_cherry_pick_no_flag_when_absent() {
+        let mut map = crate::message::MessageSectionsMap::new();
+        let (effective, changed) = resolve_cherry_pick(false, true, &mut map);
+        assert!(!effective);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn test_diff_options_parse_no_cherry_pick() {
+        use clap::Parser;
+        let opts = DiffOptions::try_parse_from(["test", "--no-cherry-pick"]).unwrap();
+        assert!(opts.no_cherry_pick);
+        assert!(!opts.cherry_pick);
+    }
+
+    #[test]
+    fn test_diff_options_cherry_pick_no_cherry_pick_conflict() {
+        use clap::Parser;
+        let result = DiffOptions::try_parse_from(["test", "--cherry-pick", "--no-cherry-pick"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     // Integration tests would require more complex setup with actual Git repositories

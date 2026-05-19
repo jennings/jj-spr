@@ -11,7 +11,7 @@ use std::{io::Write, process::Stdio, time::Duration};
 use crate::{
     error::{Error, Result, ResultExt},
     github::{PullRequestState, PullRequestUpdate, ReviewStatus},
-    message::build_github_body_for_merging,
+    message::{MessageSection, build_github_body_for_merging},
     output::{output, write_commit_title},
     utils::run_command,
 };
@@ -28,8 +28,19 @@ pub struct LandOptions {
     revision: Option<String>,
 }
 
+fn resolve_cherry_pick(
+    cli_cherry_pick: bool,
+    message: &crate::message::MessageSectionsMap,
+) -> bool {
+    cli_cherry_pick
+        || message
+            .get(&MessageSection::CherryPick)
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
 pub async fn land(
-    opts: LandOptions,
+    mut opts: LandOptions,
     jj: &crate::jj::Jujutsu,
     gh: &mut crate::github::GitHub,
     config: &crate::config::Config,
@@ -37,8 +48,10 @@ pub async fn land(
     let revision = opts.revision.as_deref().unwrap_or("@");
     let prepared_commit = jj.get_prepared_commit_for_revision(config, revision)?;
 
-    // For Jujutsu, we'll determine if this is cherry-pick based on the revision's ancestry
-    // For now, we'll trust the user's --cherry-pick flag
+    // Honor both the --cherry-pick flag and the "Cherry Pick:" marker on the
+    // commit description. When the validation TODO below is filled in, use
+    // opts.cherry_pick as the authoritative source.
+    opts.cherry_pick = resolve_cherry_pick(opts.cherry_pick, &prepared_commit.message);
 
     write_commit_title(&prepared_commit)?;
 
@@ -324,4 +337,49 @@ pub async fn land(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map_with_cherry_pick(value: &str) -> crate::message::MessageSectionsMap {
+        [(MessageSection::CherryPick, value.to_string())].into()
+    }
+
+    #[test]
+    fn test_land_resolve_flag_true() {
+        let map = crate::message::MessageSectionsMap::new();
+        assert!(resolve_cherry_pick(true, &map));
+    }
+
+    #[test]
+    fn test_land_resolve_flag_false_with_marker() {
+        let map = map_with_cherry_pick("true");
+        assert!(resolve_cherry_pick(false, &map));
+    }
+
+    #[test]
+    fn test_land_resolve_flag_false_without_marker() {
+        let map = crate::message::MessageSectionsMap::new();
+        assert!(!resolve_cherry_pick(false, &map));
+    }
+
+    #[test]
+    fn test_land_resolve_marker_case_insensitive() {
+        let map = map_with_cherry_pick("TRUE");
+        assert!(resolve_cherry_pick(false, &map));
+    }
+
+    #[test]
+    fn test_land_resolve_marker_other_value() {
+        for value in &["false", "yes", "1", ""] {
+            let map = map_with_cherry_pick(value);
+            assert!(
+                !resolve_cherry_pick(false, &map),
+                "Expected false for marker value {:?}",
+                value
+            );
+        }
+    }
 }

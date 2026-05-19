@@ -323,6 +323,44 @@ fn test_list_command_behavior() {
 }
 
 // ============================================================================
+// CHERRY-PICK FLAG TESTS
+// ============================================================================
+
+#[test]
+fn test_diff_rejects_conflicting_cherry_pick_flags() {
+    let (_temp_dir, repo_path) = create_jj_repo();
+    let output = run_jj_spr(
+        &["diff", "--cherry-pick", "--no-cherry-pick"],
+        Some(&repo_path),
+    );
+    assert!(
+        !output.status.success(),
+        "Conflicting flags should cause a non-zero exit"
+    );
+    let all_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        all_output.contains("cannot be used with"),
+        "Error message should mention argument conflict, got: {}",
+        all_output
+    );
+}
+
+#[test]
+fn test_diff_help_mentions_no_cherry_pick() {
+    let output = run_jj_spr(&["diff", "--help"], None);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no-cherry-pick"),
+        "diff --help should document --no-cherry-pick"
+    );
+}
+
+// ============================================================================
 // INTEGRATION SUMMARY TEST
 // ============================================================================
 

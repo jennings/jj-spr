@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - jj-spr now works in workspaces that aren't colocated.
 - The first commit in a pull reuqest now uses the local commit's description.
+- `jj spr diff` remembers when PRs were created as cherry picks so
+  `--cherry-pick` doesn't need to be specified each time the PR is updated.
 
 ## [0.1.0] - 2025-11-15
 
