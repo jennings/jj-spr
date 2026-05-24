@@ -14,7 +14,7 @@ use crate::{
     },
     message::{MessageSection, validate_commit_message},
     output::{output, write_commit_title},
-    utils::{parse_name_list, remove_all_parens, run_command},
+    utils::{parse_name_list, remove_all_parens, run_command, slugify},
 };
 use git2::Oid;
 use indoc::{formatdoc, indoc};
@@ -371,9 +371,7 @@ async fn diff_impl(
 
     let pull_request_branch = match &pull_request {
         Some(pr) => pr.head.clone(),
-        None => {
-            config.new_github_branch(&config.get_new_branch_name(&jj.get_all_ref_names()?, title))
-        }
+        None => config.new_github_branch(&get_new_branch_name(config, jj, local_commit.oid, title)?),
     };
 
     // Get the tree ids of the current head of the Pull Request, as well as the
@@ -547,7 +545,7 @@ async fn diff_impl(
         let base_branch = if let Some(base_branch) = base_branch {
             base_branch
         } else {
-            config.new_github_branch(&config.get_base_branch_name(&jj.get_all_ref_names()?, title))
+            config.new_github_branch(&get_base_branch_name(config, jj, local_commit.oid, title)?)
         };
 
         (Some(new_base_branch_commit), Some(base_branch))
@@ -769,6 +767,58 @@ async fn diff_impl(
     Ok(())
 }
 
+fn get_new_branch_name(
+    config: &crate::config::Config,
+    jj: &crate::jj::Jujutsu,
+    commit_oid: Oid,
+    title: &str,
+) -> Result<String> {
+    if config.use_jj_bookmark_names {
+        return jj.get_jj_bookmark_name_for_commit(commit_oid);
+    }
+    find_unused_branch_name(config, jj, &slugify(title))
+}
+
+fn get_base_branch_name(
+    config: &crate::config::Config,
+    jj: &crate::jj::Jujutsu,
+    commit_oid: Oid,
+    title: &str,
+) -> Result<String> {
+    if config.use_jj_bookmark_names {
+        let name = jj.get_jj_bookmark_name_for_commit(commit_oid)?;
+        return Ok(format!("{}.{}", config.master_ref.branch_name(), name));
+    }
+    find_unused_branch_name(
+        config,
+        jj,
+        &format!("{}.{}", config.master_ref.branch_name(), &slugify(title)),
+    )
+}
+
+fn find_unused_branch_name(
+    config: &crate::config::Config,
+    jj: &crate::jj::Jujutsu,
+    slug: &str,
+) -> Result<String> {
+    let existing_ref_names = jj.get_all_ref_names()?;
+    let remote_name = &config.remote_name;
+    let branch_prefix = &config.branch_prefix;
+    let mut branch_name = format!("{branch_prefix}{slug}");
+    let mut suffix = 0;
+
+    loop {
+        let remote_ref = format!("refs/remotes/{remote_name}/{branch_name}");
+
+        if !existing_ref_names.contains(&remote_ref) {
+            return Ok(branch_name);
+        }
+
+        suffix += 1;
+        branch_name = format!("{branch_prefix}{slug}-{suffix}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,6 +832,7 @@ mod tests {
             "origin".into(),
             "main".into(),
             "spr/test/".into(),
+            false,
             false,
         )
     }

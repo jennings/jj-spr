@@ -5,9 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::collections::HashSet;
-
-use crate::{error::Result, github::GitHubBranch, utils::slugify};
+use crate::{error::Result, github::GitHubBranch};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -17,6 +15,7 @@ pub struct Config {
     pub master_ref: GitHubBranch,
     pub branch_prefix: String,
     pub require_approval: bool,
+    pub use_jj_bookmark_names: bool,
 }
 
 impl Config {
@@ -27,6 +26,7 @@ impl Config {
         master_branch: String,
         branch_prefix: String,
         require_approval: bool,
+        use_jj_bookmark_names: bool,
     ) -> Self {
         let master_ref =
             GitHubBranch::new_from_branch_name(&master_branch, &remote_name, &master_branch);
@@ -37,6 +37,7 @@ impl Config {
             master_ref,
             branch_prefix,
             require_approval,
+            use_jj_bookmark_names,
         }
     }
 
@@ -71,39 +72,6 @@ impl Config {
         }
 
         None
-    }
-
-    pub fn get_new_branch_name(&self, existing_ref_names: &HashSet<String>, title: &str) -> String {
-        self.find_unused_branch_name(existing_ref_names, &slugify(title))
-    }
-
-    pub fn get_base_branch_name(
-        &self,
-        existing_ref_names: &HashSet<String>,
-        title: &str,
-    ) -> String {
-        self.find_unused_branch_name(
-            existing_ref_names,
-            &format!("{}.{}", self.master_ref.branch_name(), &slugify(title)),
-        )
-    }
-
-    fn find_unused_branch_name(&self, existing_ref_names: &HashSet<String>, slug: &str) -> String {
-        let remote_name = &self.remote_name;
-        let branch_prefix = &self.branch_prefix;
-        let mut branch_name = format!("{branch_prefix}{slug}");
-        let mut suffix = 0;
-
-        loop {
-            let remote_ref = format!("refs/remotes/{remote_name}/{branch_name}");
-
-            if !existing_ref_names.contains(&remote_ref) {
-                return branch_name;
-            }
-
-            suffix += 1;
-            branch_name = format!("{branch_prefix}{slug}-{suffix}");
-        }
     }
 
     pub fn new_github_branch_from_ref(&self, ghref: &str) -> Result<GitHubBranch> {
@@ -228,6 +196,7 @@ mod tests {
             "origin".into(),
             "master".into(),
             "spr/foo/".into(),
+            false,
             false,
         )
     }
