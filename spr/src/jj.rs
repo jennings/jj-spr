@@ -332,6 +332,26 @@ impl Jujutsu {
         Ok(output.trim().to_string())
     }
 
+    /// Evaluate jj's `templates.git_push_bookmark` template for a commit to get
+    /// the bookmark name that `jj git push --change` would use.
+    pub fn get_jj_bookmark_name_for_commit(&self, commit_oid: Oid) -> Result<String> {
+        // Get the configured template (jj returns its built-in default if not configured)
+        let tmpl = self
+            .run_captured_with_args(["config", "get", "templates.git_push_bookmark"])?;
+        let tmpl = tmpl.trim().to_string();
+
+        let output = self.run_captured_with_args([
+            "log",
+            "--no-graph",
+            "-r",
+            &commit_oid.to_string(),
+            "--template",
+            &tmpl,
+        ])?;
+
+        Ok(output.trim().to_string())
+    }
+
     fn run_captured_with_args<I, S>(&self, args: I) -> Result<String>
     where
         I: IntoIterator<Item = S>,
@@ -461,6 +481,7 @@ mod tests {
             "origin".into(),
             "main".into(),
             "spr/test/".into(),
+            false,
             false,
         )
     }
@@ -690,6 +711,52 @@ mod tests {
         assert!(
             derived_committer_time.seconds() > original_committer_time.seconds(),
             "Derived commit committer timestamp should be newer than original"
+        );
+    }
+
+    #[test]
+    fn test_get_jj_bookmark_name_for_commit() {
+        let (_temp_dir, repo_path) = create_jujutsu_test_repo();
+
+        // Set a known template at repo level to isolate from user config.
+        // The value is a TOML single-quoted string containing the template expression.
+        let set_output = std::process::Command::new("jj")
+            .args([
+                "config",
+                "set",
+                "--repo",
+                "templates.git_push_bookmark",
+                r#"'"test-push-" ++ change_id.short()'"#,
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to run jj config set");
+        assert!(
+            set_output.status.success(),
+            "jj config set failed: {}",
+            String::from_utf8_lossy(&set_output.stderr)
+        );
+
+        let _commit = create_jujutsu_commit(&repo_path, "Test commit", "content");
+
+        let jj = Jujutsu::new(repo_path.clone()).expect("Failed to create Jujutsu instance");
+
+        let commit_oid = jj
+            .resolve_revision_to_commit_id("@-")
+            .expect("Failed to resolve revision");
+
+        let name = jj
+            .get_jj_bookmark_name_for_commit(commit_oid)
+            .expect("Failed to get bookmark name");
+
+        assert!(
+            name.starts_with("test-push-"),
+            "Expected bookmark name starting with 'test-push-', got: {}",
+            name
+        );
+        assert!(
+            name.len() > "test-push-".len(),
+            "Expected change ID suffix after 'test-push-'"
         );
     }
 }

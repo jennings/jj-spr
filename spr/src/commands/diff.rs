@@ -773,6 +773,9 @@ fn get_new_branch_name(
     commit_oid: Oid,
     title: &str,
 ) -> Result<String> {
+    if config.use_jj_bookmark_names {
+        return jj.get_jj_bookmark_name_for_commit(commit_oid);
+    }
     find_unused_branch_name(config, jj, &slugify(title))
 }
 
@@ -782,6 +785,10 @@ fn get_base_branch_name(
     commit_oid: Oid,
     title: &str,
 ) -> Result<String> {
+    if config.use_jj_bookmark_names {
+        let name = jj.get_jj_bookmark_name_for_commit(commit_oid)?;
+        return Ok(format!("{}.{}", config.master_ref.branch_name(), name));
+    }
     find_unused_branch_name(
         config,
         jj,
@@ -825,6 +832,7 @@ mod tests {
             "origin".into(),
             "main".into(),
             "spr/test/".into(),
+            false,
             false,
         )
     }

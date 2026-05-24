@@ -15,6 +15,7 @@ pub struct Config {
     pub master_ref: GitHubBranch,
     pub branch_prefix: String,
     pub require_approval: bool,
+    pub use_jj_bookmark_names: bool,
 }
 
 impl Config {
@@ -25,6 +26,7 @@ impl Config {
         master_branch: String,
         branch_prefix: String,
         require_approval: bool,
+        use_jj_bookmark_names: bool,
     ) -> Self {
         let master_ref =
             GitHubBranch::new_from_branch_name(&master_branch, &remote_name, &master_branch);
@@ -35,6 +37,7 @@ impl Config {
             master_ref,
             branch_prefix,
             require_approval,
+            use_jj_bookmark_names,
         }
     }
 
@@ -193,6 +196,7 @@ mod tests {
             "origin".into(),
             "master".into(),
             "spr/foo/".into(),
+            false,
             false,
         )
     }
