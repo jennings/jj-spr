@@ -195,16 +195,16 @@ git config spr.requireApproval true
 
 ## Documentation
 
-Full documentation is available at **[luciofranco.github.io/jj-spr](https://luciofranco.github.io/jj-spr/)**
+Full documentation is available at **[jennings.io/jj-spr](https://jennings.io/jj-spr/)**
 
 Quick links:
-- [Installation](https://luciofranco.github.io/jj-spr/user/installation.html) - Detailed installation instructions
-- [Setup](https://luciofranco.github.io/jj-spr/user/setup.html) - Initial configuration
-- [Simple PR Workflow](https://luciofranco.github.io/jj-spr/user/simple.html) - Single PR workflow guide
-- [Stacked PRs](https://luciofranco.github.io/jj-spr/user/stack.html) - Multi-PR workflows and stacking
-- [Commit Messages](https://luciofranco.github.io/jj-spr/user/commit-message.html) - Message format and sections
-- [Commands Reference](https://luciofranco.github.io/jj-spr/reference/commands.html) - Complete command reference
-- [Configuration](https://luciofranco.github.io/jj-spr/reference/configuration.html) - All configuration options
+- [Installation](https://jennings.io/jj-spr/user/installation.html) - Detailed installation instructions
+- [Setup](https://jennings.io/jj-spr/user/setup.html) - Initial configuration
+- [Simple PR Workflow](https://jennings.io/jj-spr/user/simple.html) - Single PR workflow guide
+- [Stacked PRs](https://jennings.io/jj-spr/user/stack.html) - Multi-PR workflows and stacking
+- [Commit Messages](https://jennings.io/jj-spr/user/commit-message.html) - Message format and sections
+- [Commands Reference](https://jennings.io/jj-spr/reference/commands.html) - Complete command reference
+- [Configuration](https://jennings.io/jj-spr/reference/configuration.html) - All configuration options
 
 ## Contributing
 
