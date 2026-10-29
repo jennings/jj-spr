@@ -789,7 +789,7 @@ async fn diff_impl(
                 "✨",
                 &format!(
                     "Created new Pull Request #{}: {}",
-                    pull_request_number, &pull_request_url,
+                    pull_request_number, pull_request_url,
                 ),
             )?;
 

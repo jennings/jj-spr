@@ -33,13 +33,7 @@ pub async fn init() -> Result<()> {
         "Okay, let's get started. First we need to authenticate to GitHub.",
     )?;
 
-    let github_auth_token = get_auth_token_with_source(&config).and_then(|value| {
-        if value.token().is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    });
+    let github_auth_token = get_auth_token_with_source(&config).filter(|value| !value.token().is_empty());
 
     let reuse_token = match github_auth_token {
         None => false,
@@ -136,7 +130,7 @@ pub async fn init() -> Result<()> {
     let github_repo = config
         .get_string("spr.githubRepository")
         .ok()
-        .and_then(|value| if value.is_empty() { None } else { Some(value) })
+        .filter(|value| !value.is_empty())
         .or_else(|| {
             url.as_ref()
                 .and_then(|url| regex.captures(url))
@@ -154,7 +148,7 @@ pub async fn init() -> Result<()> {
     // Master branch name (just query GitHub)
 
     let github_repo_info = octocrab
-        .get::<octocrab::models::Repository, _, _>(format!("/repos/{}", &github_repo), None::<&()>)
+        .get::<octocrab::models::Repository, _, _>(format!("/repos/{}", github_repo), None::<&()>)
         .await?;
 
     set_jj_config(
@@ -174,8 +168,8 @@ pub async fn init() -> Result<()> {
     let branch_prefix = config
         .get_string("spr.branchPrefix")
         .ok()
-        .and_then(|value| if value.is_empty() { None } else { Some(value) })
-        .unwrap_or_else(|| format!("spr/{}/", &github_user.login));
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("spr/{}/", github_user.login));
 
     output(
         "❓",
