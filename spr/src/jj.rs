@@ -46,6 +46,15 @@ pub struct PreparedCommit {
     pub dry_run_action: Option<DryRunAction>,
 }
 
+/// A change in a revset, with the information needed to associate it with a
+/// Pull Request.
+#[derive(Debug)]
+pub struct ChangeInfo {
+    pub change_id: String,
+    pub local_bookmarks: Vec<String>,
+    pub pull_request_number: Option<u64>,
+}
+
 pub struct Jujutsu {
     repo_path: PathBuf,
     jj_bin: PathBuf,
@@ -123,6 +132,70 @@ impl Jujutsu {
         commits.reverse();
 
         Ok(commits)
+    }
+
+    pub fn get_changes_in_revset(&self, config: &Config, revset: &str) -> Result<Vec<ChangeInfo>> {
+        // One record per change: change ID, space-separated local bookmarks
+        // and the description, terminated by a NUL byte since descriptions
+        // span multiple lines.
+        // Read-only lookup: skip snapshotting the working copy.
+        let output = self.run_captured_with_args([
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            revset,
+            "--template",
+            r#"change_id.shortest(8) ++ "\n" ++ local_bookmarks.map(|b| b.name()).join(" ") ++ "\n" ++ description ++ "\0""#,
+        ])?;
+
+        let mut changes = Vec::new();
+        for record in output.split('\0') {
+            let mut parts = record.splitn(3, '\n');
+            let change_id = parts.next().unwrap_or("").trim();
+            if change_id.is_empty() {
+                continue;
+            }
+            let local_bookmarks = parts
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .map(String::from)
+                .collect();
+            let message = parse_message(parts.next().unwrap_or(""), MessageSection::Title);
+            let pull_request_number = message
+                .get(&MessageSection::PullRequest)
+                .and_then(|url| config.parse_pull_request_field(url));
+
+            changes.push(ChangeInfo {
+                change_id: change_id.to_string(),
+                local_bookmarks,
+                pull_request_number,
+            });
+        }
+
+        Ok(changes)
+    }
+
+    /// Names of bookmarks on `remote` that are tracked by a local bookmark.
+    pub fn get_tracked_bookmarks(&self, remote: &str) -> Result<std::collections::HashSet<String>> {
+        let output = self.run_captured_with_args([
+            "--ignore-working-copy",
+            "bookmark",
+            "list",
+            "--tracked",
+            "--remote",
+            remote,
+            "--template",
+            r#"if(remote, name ++ "\n")"#,
+        ])?;
+
+        Ok(output
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect())
     }
 
     pub fn check_no_uncommitted_changes(&self) -> Result<()> {
@@ -341,6 +414,7 @@ impl Jujutsu {
         command.args(args);
         command.current_dir(&self.repo_path);
         command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
 
         let child = command.spawn().context("jj failed to spawn".to_string())?;
         let output = child
@@ -527,6 +601,70 @@ mod tests {
             .expect("Invalid UTF-8 in jj output")
             .trim()
             .to_string()
+    }
+
+    #[test]
+    fn test_changes_in_revset_and_tracked_bookmarks() {
+        let (_temp_dir, repo_path) = create_jujutsu_test_repo();
+        let config = create_test_config();
+        let jj_cmd = |args: &[&str]| {
+            let output = std::process::Command::new("jj")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .expect("Failed to run jj");
+            assert!(
+                output.status.success(),
+                "jj {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        let remote_dir = TempDir::new().expect("Failed to create temp directory");
+        let remote_path = remote_dir.path().join("remote.git");
+        git2::Repository::init_bare(&remote_path).expect("Failed to create bare remote");
+        jj_cmd(&[
+            "git",
+            "remote",
+            "add",
+            "origin",
+            remote_path.to_str().unwrap(),
+        ]);
+
+        let spr_change = create_jujutsu_commit(
+            &repo_path,
+            "Spr change\n\nSome body\n\nPull Request: https://github.com/test_owner/test_repo/pull/42",
+            "one",
+        );
+        let tracked_change = create_jujutsu_commit(&repo_path, "Tracked change", "two");
+        let local_change = create_jujutsu_commit(&repo_path, "Local change", "three");
+
+        jj_cmd(&["bookmark", "create", "feature", "-r", &tracked_change]);
+        jj_cmd(&["bookmark", "track", "feature", "--remote", "origin"]);
+        jj_cmd(&["git", "push", "--bookmark", "feature"]);
+        jj_cmd(&["bookmark", "create", "local-only", "-r", &local_change]);
+
+        let jj = Jujutsu::new(repo_path.clone()).expect("Failed to create Jujutsu instance");
+
+        let tracked = jj.get_tracked_bookmarks("origin").unwrap();
+        assert_eq!(tracked, ["feature".to_string()].into_iter().collect());
+
+        let changes = jj
+            .get_changes_in_revset(&config, "mutable() & ~empty()")
+            .unwrap();
+        assert_eq!(changes.len(), 3, "{changes:?}");
+        let find = |id: &str| {
+            changes
+                .iter()
+                .find(|c| id.starts_with(&c.change_id))
+                .expect("change not found")
+        };
+        assert_eq!(find(&spr_change).pull_request_number, Some(42));
+        assert!(find(&spr_change).local_bookmarks.is_empty());
+        assert_eq!(find(&tracked_change).pull_request_number, None);
+        assert_eq!(find(&tracked_change).local_bookmarks, vec!["feature"]);
+        assert_eq!(find(&local_change).local_bookmarks, vec!["local-only"]);
     }
 
     #[test]
