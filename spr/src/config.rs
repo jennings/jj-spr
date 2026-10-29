@@ -7,7 +7,38 @@
 
 use std::collections::HashSet;
 
-use crate::{error::Result, github::GitHubBranch, utils::slugify};
+use crate::{
+    error::{Error, Result},
+    github::GitHubBranch,
+    utils::slugify,
+};
+
+/// Number of change ID characters used in branch names.
+pub const BRANCH_CHANGE_ID_LEN: usize = 8;
+
+/// How the names of newly created pull request branches are generated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BranchNameStyle {
+    /// A shortened slug of the commit title, e.g. `spr/user/fix-the-thing`
+    #[default]
+    Title,
+    /// The (shortened) Jujutsu change ID, e.g. `spr/user/kxqpmrzw`
+    ChangeId,
+}
+
+impl std::str::FromStr for BranchNameStyle {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "title" => Ok(Self::Title),
+            "change-id" | "changeid" | "change_id" => Ok(Self::ChangeId),
+            other => Err(Error::new(format!(
+                "invalid spr.branchNameStyle '{other}' (expected 'title' or 'change-id')"
+            ))),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -17,6 +48,7 @@ pub struct Config {
     pub master_ref: GitHubBranch,
     pub branch_prefix: String,
     pub require_approval: bool,
+    pub branch_name_style: BranchNameStyle,
 }
 
 impl Config {
@@ -37,6 +69,30 @@ impl Config {
             master_ref,
             branch_prefix,
             require_approval,
+            branch_name_style: BranchNameStyle::default(),
+        }
+    }
+
+    pub fn with_branch_name_style(mut self, branch_name_style: BranchNameStyle) -> Self {
+        self.branch_name_style = branch_name_style;
+        self
+    }
+
+    /// The part of a branch name that identifies the change, according to the
+    /// configured `BranchNameStyle`. Falls back to the change ID if the title
+    /// produces an empty slug.
+    fn branch_slug(&self, title: &str, change_id: &str) -> String {
+        let short_change_id: String = change_id.chars().take(BRANCH_CHANGE_ID_LEN).collect();
+        match self.branch_name_style {
+            BranchNameStyle::ChangeId => short_change_id,
+            BranchNameStyle::Title => {
+                let slug = slugify(title);
+                if slug.is_empty() {
+                    short_change_id
+                } else {
+                    slug
+                }
+            }
         }
     }
 
@@ -73,18 +129,28 @@ impl Config {
         None
     }
 
-    pub fn get_new_branch_name(&self, existing_ref_names: &HashSet<String>, title: &str) -> String {
-        self.find_unused_branch_name(existing_ref_names, &slugify(title))
+    pub fn get_new_branch_name(
+        &self,
+        existing_ref_names: &HashSet<String>,
+        title: &str,
+        change_id: &str,
+    ) -> String {
+        self.find_unused_branch_name(existing_ref_names, &self.branch_slug(title, change_id))
     }
 
     pub fn get_base_branch_name(
         &self,
         existing_ref_names: &HashSet<String>,
         title: &str,
+        change_id: &str,
     ) -> String {
         self.find_unused_branch_name(
             existing_ref_names,
-            &format!("{}.{}", self.master_ref.branch_name(), &slugify(title)),
+            &format!(
+                "{}.{}",
+                self.master_ref.branch_name(),
+                self.branch_slug(title, change_id)
+            ),
         )
     }
 
@@ -341,6 +407,61 @@ mod tests {
             std::path::Path::new("/nonexistent/path"),
         );
         assert!(result.is_err(), "Should fail for invalid repo path");
+    }
+
+    #[test]
+    fn test_branch_name_style_parse() {
+        assert_eq!(
+            "title".parse::<BranchNameStyle>().unwrap(),
+            BranchNameStyle::Title
+        );
+        assert_eq!(
+            "change-id".parse::<BranchNameStyle>().unwrap(),
+            BranchNameStyle::ChangeId
+        );
+        assert_eq!(
+            "changeId".parse::<BranchNameStyle>().unwrap(),
+            BranchNameStyle::ChangeId
+        );
+        assert!("bogus".parse::<BranchNameStyle>().is_err());
+    }
+
+    #[test]
+    fn test_new_branch_name_title_style() {
+        let config = config_factory();
+        let existing = HashSet::new();
+        assert_eq!(
+            config.get_new_branch_name(
+                &existing,
+                "Add support for very long pull request titles in branch names",
+                "kxqpmrzwlsnvytuoqkxqpmrzwlsnvytu"
+            ),
+            "spr/foo/add-support-for-very-long-pull"
+        );
+        // Titles that slugify to nothing fall back to the change ID
+        assert_eq!(
+            config.get_new_branch_name(&existing, "!!!", "kxqpmrzwlsnvytuo"),
+            "spr/foo/kxqpmrzw"
+        );
+    }
+
+    #[test]
+    fn test_new_branch_name_change_id_style() {
+        let config = config_factory().with_branch_name_style(BranchNameStyle::ChangeId);
+        let mut existing = HashSet::new();
+        assert_eq!(
+            config.get_new_branch_name(&existing, "Some title", "kxqpmrzwlsnvytuo"),
+            "spr/foo/kxqpmrzw"
+        );
+        assert_eq!(
+            config.get_base_branch_name(&existing, "Some title", "kxqpmrzwlsnvytuo"),
+            "spr/foo/master.kxqpmrzw"
+        );
+        existing.insert("refs/remotes/origin/spr/foo/kxqpmrzw".to_string());
+        assert_eq!(
+            config.get_new_branch_name(&existing, "Some title", "kxqpmrzwlsnvytuo"),
+            "spr/foo/kxqpmrzw-1"
+        );
     }
 
     #[test]

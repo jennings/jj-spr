@@ -318,7 +318,7 @@ impl Jujutsu {
         })
     }
 
-    fn get_change_id_for_commit(&self, commit_oid: Oid) -> Result<String> {
+    pub fn get_change_id_for_commit(&self, commit_oid: Oid) -> Result<String> {
         // Get the change ID for a given commit OID
         let output = self.run_captured_with_args([
             "log",

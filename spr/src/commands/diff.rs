@@ -417,7 +417,12 @@ async fn diff_impl(
     let pull_request_branch = match &pull_request {
         Some(pr) => pr.head.clone(),
         None => {
-            config.new_github_branch(&config.get_new_branch_name(&jj.get_all_ref_names()?, title))
+            let change_id = jj.get_change_id_for_commit(local_commit.oid)?;
+            config.new_github_branch(&config.get_new_branch_name(
+                &jj.get_all_ref_names()?,
+                title,
+                &change_id,
+            ))
         }
     };
 
@@ -592,7 +597,12 @@ async fn diff_impl(
         let base_branch = if let Some(base_branch) = base_branch {
             base_branch
         } else {
-            config.new_github_branch(&config.get_base_branch_name(&jj.get_all_ref_names()?, title))
+            let change_id = jj.get_change_id_for_commit(local_commit.oid)?;
+            config.new_github_branch(&config.get_base_branch_name(
+                &jj.get_all_ref_names()?,
+                title,
+                &change_id,
+            ))
         };
 
         (Some(new_base_branch_commit), Some(base_branch))

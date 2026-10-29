@@ -134,6 +134,10 @@ pub async fn spr() -> Result<()> {
     let branch_prefix = get_config_value("spr.branchPrefix", &git_config)
         .ok_or_else(|| Error::new("spr.branchPrefix must be configured".to_string()))?;
     let require_approval = get_config_bool("spr.requireApproval", &git_config).unwrap_or(false);
+    let branch_name_style = get_config_value("spr.branchNameStyle", &git_config)
+        .map(|s| s.parse())
+        .transpose()?
+        .unwrap_or_default();
 
     let config = jj_spr::config::Config::new(
         github_owner,
@@ -142,7 +146,8 @@ pub async fn spr() -> Result<()> {
         github_master_branch,
         branch_prefix,
         require_approval,
-    );
+    )
+    .with_branch_name_style(branch_name_style);
 
     if let Commands::Format(opts) = cli.command {
         return commands::format::format(opts, &jj, &config).await;
