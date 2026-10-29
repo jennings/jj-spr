@@ -88,7 +88,7 @@ The codebase follows a library + binary structure:
 
 1. **Change-based workflow**: Each Jujutsu change (identified by a change ID) maps to one GitHub PR. The PR branch name includes the change ID to maintain the link even after rebases.
 
-2. **Stacked PR handling**: When creating stacked PRs, the tool creates intermediate branches for each change in the stack. The base branch of PR #2 points to the PR branch of PR #1, allowing independent reviews and landing.
+2. **Stacked PR handling**: Controlled by `spr.stackStyle`. With `synthetic` (the default), each PR not directly on master targets its own synthetic base branch (`<prefix><master>.<name>`) whose tree is the local parent's, so PRs can be landed in any order. With `native`, PR #2 targets PR #1's head branch, and its head merges in PR #1's head so GitHub shows only its own changes; PRs land bottom-up and `land` retargets children to master.
 
 3. **Commit message structure**: Commit messages are parsed into sections (Summary, Reviewers, etc.) which are stored in both the local Jujutsu change and the GitHub PR. The tool maintains bidirectional sync.
 
@@ -138,7 +138,7 @@ The codebase follows a library + binary structure:
 ### Stacked PRs
 1. User creates multiple changes with parent-child relationships
 2. Runs `jj spr diff --all` or `jj spr diff -r main..@`
-3. Tool creates PRs in order, each with base pointing to previous PR's branch
+3. Tool creates PRs in order, each with a synthetic base branch (default) or, with `spr.stackStyle = native`, with base pointing to the previous PR's branch
 4. When landing, only the bottom PR is merged; others remain valid
 
 ## Testing Strategy

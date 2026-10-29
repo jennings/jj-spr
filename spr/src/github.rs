@@ -404,6 +404,34 @@ impl GitHub {
         Ok(())
     }
 
+    /// Numbers of the open Pull Requests whose head branch is `head`.
+    pub async fn get_open_pull_requests_with_head(&self, head: &GitHubBranch) -> Result<Vec<u64>> {
+        let page = octocrab::instance()
+            .pulls(self.config.owner.clone(), self.config.repo.clone())
+            .list()
+            .state(octocrab::params::State::Open)
+            .head(format!("{}:{}", self.config.owner, head.branch_name()))
+            .per_page(100u8)
+            .send()
+            .await?;
+
+        Ok(page.items.into_iter().map(|pr| pr.number).collect())
+    }
+
+    /// Numbers of the open Pull Requests that target `base`.
+    pub async fn get_open_pull_requests_with_base(&self, base: &GitHubBranch) -> Result<Vec<u64>> {
+        let page = octocrab::instance()
+            .pulls(self.config.owner.clone(), self.config.repo.clone())
+            .list()
+            .state(octocrab::params::State::Open)
+            .base(base.branch_name())
+            .per_page(100u8)
+            .send()
+            .await?;
+
+        Ok(page.items.into_iter().map(|pr| pr.number).collect())
+    }
+
     pub async fn request_reviewers(
         &self,
         number: u64,

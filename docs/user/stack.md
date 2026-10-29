@@ -141,7 +141,12 @@ This shows all your changes that are descendants of `main@origin`.
 
 ### Visual: Local Stack vs GitHub PRs
 
-Here's what the above stack looks like locally vs on GitHub:
+How the stack appears on GitHub depends on the `spr.stackStyle` setting.
+
+**Native stacking (`spr.stackStyle = native`)**
+
+Each PR targets the branch of the PR below it, so GitHub shows a regular
+stack of PRs:
 
 ```
 Local Jujutsu State:                 GitHub State:
@@ -149,19 +154,44 @@ Local Jujutsu State:                 GitHub State:
 @  qpvuntsm (empty)
 │
 ○  kmkuslkw                     →    PR #124: "Add user profile endpoints"
-│  Add user profile endpoints        base: jj-spr-rlvkpnrw (PR #123's branch)
-│                                    branch: jj-spr-kmkuslkw
+│  Add user profile endpoints        base: PR #123's branch
+│
 ○  rlvkpnrw                     →    PR #123: "Add authentication module"
 │  Add authentication module         base: main
-│                                    branch: jj-spr-rlvkpnrw
+│
 ◆  main@origin
 ```
 
-**Key points:**
-- Each change has a unique ID (`rlvkpnrw`, `kmkuslkw`)
-- jj-spr creates GitHub branches automatically (`jj-spr-{change-id}`)
-- Stacked PRs: PR #124 is based on PR #123's branch
-- When PR #123 lands, PR #124 automatically updates to be based on `main`
+- PRs must land bottom-up. `jj spr land` refuses to land PR #124 while
+  PR #123 is open.
+- When PR #123 lands, `jj spr land` changes the base of PR #124 to `main`.
+  Rebase your stack and run `jj spr diff` to update PR #124. Until then,
+  GitHub also shows the changes of PR #123 in it.
+- `jj spr diff` on a single change needs an up-to-date PR for its parent.
+  Use `jj spr diff --all` to update the whole stack.
+
+To turn it on:
+
+```shell
+jj config set --repo spr.stackStyle native
+```
+
+**Synthetic base branches (`spr.stackStyle = synthetic`, the default)**
+
+Each PR targets its own base branch (`<branchPrefix>main.<name>`), which
+jj-spr creates and keeps in sync with the parent change:
+
+```
+○  kmkuslkw                     →    PR #124: "Add user profile endpoints"
+│                                    base: <branchPrefix>main.add-user-profile-endpoints
+○  rlvkpnrw                     →    PR #123: "Add authentication module"
+│                                    base: main
+◆  main@origin
+```
+
+- Each PR shows only the changes of its own commit.
+- GitHub does not know that the PRs form a stack, and does not
+  update PR #124 when PR #123 lands.
 
 ## Updating Changes in the Stack
 

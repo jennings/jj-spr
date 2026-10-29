@@ -7,7 +7,40 @@
 
 use std::collections::HashSet;
 
-use crate::{error::Result, github::GitHubBranch, utils::slugify};
+use crate::{
+    error::{Error, Result},
+    github::GitHubBranch,
+    utils::slugify,
+};
+
+/// How Pull Requests for commits that are not directly based on the master
+/// branch are set up on GitHub.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StackStyle {
+    /// Each Pull Request targets its own synthetic base branch (named
+    /// `<prefix><master>.<slug>`) holding the changes it is based on. Pull
+    /// Requests in a stack can be landed in any order.
+    #[default]
+    Synthetic,
+    /// Each Pull Request targets the head branch of the Pull Request for its
+    /// parent commit, so GitHub shows the stack natively. Pull Requests have
+    /// to be landed bottom-up.
+    Native,
+}
+
+impl std::str::FromStr for StackStyle {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "synthetic" => Ok(Self::Synthetic),
+            "native" => Ok(Self::Native),
+            other => Err(Error::new(format!(
+                "invalid spr.stackStyle '{other}' (expected 'synthetic' or 'native')"
+            ))),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -17,6 +50,7 @@ pub struct Config {
     pub master_ref: GitHubBranch,
     pub branch_prefix: String,
     pub require_approval: bool,
+    pub stack_style: StackStyle,
 }
 
 impl Config {
@@ -37,7 +71,13 @@ impl Config {
             master_ref,
             branch_prefix,
             require_approval,
+            stack_style: StackStyle::default(),
         }
+    }
+
+    pub fn with_stack_style(mut self, stack_style: StackStyle) -> Self {
+        self.stack_style = stack_style;
+        self
     }
 
     pub fn pull_request_url(&self, number: u64) -> String {
@@ -341,6 +381,17 @@ mod tests {
             std::path::Path::new("/nonexistent/path"),
         );
         assert!(result.is_err(), "Should fail for invalid repo path");
+    }
+
+    #[test]
+    fn test_stack_style_parse() {
+        assert_eq!(
+            "synthetic".parse::<StackStyle>().unwrap(),
+            StackStyle::Synthetic
+        );
+        assert_eq!("Native".parse::<StackStyle>().unwrap(), StackStyle::Native);
+        assert!("bogus".parse::<StackStyle>().is_err());
+        assert_eq!(config_factory().stack_style, StackStyle::Synthetic);
     }
 
     #[test]

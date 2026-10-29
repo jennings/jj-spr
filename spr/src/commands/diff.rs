@@ -5,13 +5,16 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::iter::zip;
+use std::{collections::HashMap, iter::zip};
 
 use crate::{
+    config::StackStyle,
     error::{Error, Result, ResultExt, add_error},
     github::{
-        GitHub, PullRequest, PullRequestRequestReviewers, PullRequestState, PullRequestUpdate,
+        GitHub, GitHubBranch, PullRequest, PullRequestRequestReviewers, PullRequestState,
+        PullRequestUpdate,
     },
+    message::MessageSectionsMap,
     message::{MessageSection, validate_commit_message},
     output::{output, write_commit_title},
     utils::{parse_name_list, remove_all_parens, run_command},
@@ -147,6 +150,10 @@ pub async fn diff(
 
     let mut message_on_prompt = "".to_string();
 
+    // The Pull Request head branch and head commit for each local commit
+    // processed so far, so that stacked Pull Requests can target them.
+    let mut stack_heads: HashMap<Oid, (GitHubBranch, Oid)> = HashMap::new();
+
     for (prepared_commit, pull_request_task) in zip(prepared_commits.iter_mut(), pull_request_tasks)
     {
         if result.is_err() {
@@ -176,8 +183,14 @@ pub async fn diff(
             prepared_commit,
             master_base_oid,
             pull_request,
+            &stack_heads,
         )
-        .await;
+        .await
+        .map(|head| {
+            if let Some(head) = head {
+                stack_heads.insert(prepared_commit.oid, head);
+            }
+        });
     }
 
     // This updates the commit message in the local Jujutsu repository (if it was
@@ -268,7 +281,8 @@ async fn diff_impl(
     local_commit: &mut crate::jj::PreparedCommit,
     master_base_oid: Oid,
     pull_request: Option<PullRequest>,
-) -> Result<()> {
+    stack_heads: &HashMap<Oid, (GitHubBranch, Oid)>,
+) -> Result<Option<(GitHubBranch, Oid)>> {
     // Parsed commit message of the local commit
     let message = &mut local_commit.message;
 
@@ -421,182 +435,220 @@ async fn diff_impl(
         }
     };
 
-    // Get the tree ids of the current head of the Pull Request, as well as the
-    // base, and the commit id of the master commit this PR is currently based
-    // on.
-    // If there is no pre-existing Pull Request, we fill in the equivalent
-    // values.
-    let (pr_head_oid, pr_head_tree, pr_base_oid, pr_base_tree, pr_master_base) =
-        if let Some(pr) = &pull_request {
-            let pr_head_tree = jj.get_tree_oid_for_commit(pr.head_oid)?;
-
-            let current_master_oid = jj.resolve_reference(config.master_ref.local())?;
-            // Use git for merge base calculation since jj doesn't expose this directly
-            let pr_base_oid = jj.git_repo.merge_base(pr.head_oid, pr.base_oid)?;
-            let pr_base_tree = jj.get_tree_oid_for_commit(pr_base_oid)?;
-
-            let pr_master_base = jj.git_repo.merge_base(pr.head_oid, current_master_oid)?;
-
-            (
-                pr.head_oid,
-                pr_head_tree,
-                pr_base_oid,
-                pr_base_tree,
-                pr_master_base,
+    // Work out the commits the new Pull Request commit is based on, and the
+    // branch the Pull Request targets on GitHub:
+    // `pr_head_oid` is the first parent of the new Pull Request commit (the
+    // current head of the Pull Request, or the commit a new one starts from),
+    // `pr_base_parent` an optional second parent merged into it,
+    // `base_branch_commit` an optional commit to push to `base_branch`, and
+    // `base_branch` the branch the Pull Request targets (`None` for master).
+    let (pr_head_oid, pr_base_parent, base_branch_commit, base_branch, needs_merging_master) =
+        if config.stack_style == StackStyle::Native {
+            // With native stacking, the Pull Request targets master or the
+            // head branch of the parent commit's Pull Request directly. Its
+            // head branch must contain the tip of that branch, so that GitHub
+            // shows exactly the changes of the local commit.
+            let base = resolve_native_base(
+                jj,
+                gh,
+                config,
+                local_commit.parent_oid,
+                master_base_oid,
+                directly_based_on_master || effective_cherry_pick,
+                stack_heads,
             )
+            .await?;
+            let base_branch = (!base.branch.is_master_branch()).then(|| base.branch.clone());
+
+            if let Some(pr) = &pull_request {
+                let contains_base = pr.head_oid == base.oid
+                    || jj.git_repo.graph_descendant_of(pr.head_oid, base.oid)?;
+
+                if contains_base && jj.get_tree_oid_for_commit(pr.head_oid)? == new_head_tree {
+                    finish_without_new_commit(opts, gh, pr, message, Some(&base.branch)).await?;
+                    return Ok(Some((pr.head.clone(), pr.head_oid)));
+                }
+
+                (
+                    pr.head_oid,
+                    (!contains_base).then_some(base.oid),
+                    None,
+                    base_branch,
+                    !contains_base,
+                )
+            } else {
+                (base.oid, None, None, base_branch, false)
+            }
         } else {
-            let master_base_tree = jj.get_tree_oid_for_commit(master_base_oid)?;
-            (
-                master_base_oid,
-                master_base_tree,
-                master_base_oid,
-                master_base_tree,
-                master_base_oid,
-            )
-        };
-    let needs_merging_master = pr_master_base != master_base_oid;
+            // Get the tree ids of the current head of the Pull Request, as well as the
+            // base, and the commit id of the master commit this PR is currently based
+            // on.
+            // If there is no pre-existing Pull Request, we fill in the equivalent
+            // values.
+            let (pr_head_oid, pr_head_tree, pr_base_oid, pr_base_tree, pr_master_base) =
+                if let Some(pr) = &pull_request {
+                    let pr_head_tree = jj.get_tree_oid_for_commit(pr.head_oid)?;
 
-    // At this point we can check if we can exit early because no update to the
-    // existing Pull Request is necessary
-    if let Some(ref pull_request) = pull_request {
-        // So there is an existing Pull Request...
-        if !needs_merging_master && pr_head_tree == new_head_tree && pr_base_tree == new_base_tree {
-            // ...and it does not need a rebase, and the trees of both Pull
-            // Request branch and base are all the right ones.
-            output("✅", "No update necessary")?;
+                    let current_master_oid = jj.resolve_reference(config.master_ref.local())?;
+                    // Use git for merge base calculation since jj doesn't expose this directly
+                    let pr_base_oid = jj.git_repo.merge_base(pr.head_oid, pr.base_oid)?;
+                    let pr_base_tree = jj.get_tree_oid_for_commit(pr_base_oid)?;
 
-            if opts.update_message {
-                // However, the user requested to update the commit message on
-                // GitHub
+                    let pr_master_base = jj.git_repo.merge_base(pr.head_oid, current_master_oid)?;
 
-                let mut pull_request_updates: PullRequestUpdate = Default::default();
-                pull_request_updates.update_message(pull_request, message);
+                    (
+                        pr.head_oid,
+                        pr_head_tree,
+                        pr_base_oid,
+                        pr_base_tree,
+                        pr_master_base,
+                    )
+                } else {
+                    let master_base_tree = jj.get_tree_oid_for_commit(master_base_oid)?;
+                    (
+                        master_base_oid,
+                        master_base_tree,
+                        master_base_oid,
+                        master_base_tree,
+                        master_base_oid,
+                    )
+                };
+            let needs_merging_master = pr_master_base != master_base_oid;
 
-                if !pull_request_updates.is_empty() {
-                    if opts.dry_run {
-                        output(
-                            "  ",
-                            &format!("Would update PR #{} title/body", pull_request.number),
-                        )?;
-                    } else {
-                        // ...and there are actual changes to the message
-                        gh.update_pull_request(pull_request.number, pull_request_updates)
-                            .await?;
-                        output("✍", "Updated commit message on GitHub")?;
-                    }
+            // At this point we can check if we can exit early because no update to the
+            // existing Pull Request is necessary
+            if let Some(ref pull_request) = pull_request {
+                // So there is an existing Pull Request...
+                if !needs_merging_master
+                    && pr_head_tree == new_head_tree
+                    && pr_base_tree == new_base_tree
+                {
+                    // ...and it does not need a rebase, and the trees of both Pull
+                    // Request branch and base are all the right ones.
+                    finish_without_new_commit(opts, gh, pull_request, message, None).await?;
+                    return Ok(Some((pull_request.head.clone(), pull_request.head_oid)));
                 }
             }
 
-            return Ok(());
-        }
-    }
+            // Check if there is a base branch on GitHub already. That's the case when
+            // there is an existing Pull Request, and its base is not the master branch.
+            let base_branch = if let Some(ref pr) = pull_request {
+                if pr.base.is_master_branch() {
+                    None
+                } else {
+                    Some(pr.base.clone())
+                }
+            } else {
+                None
+            };
 
-    // Check if there is a base branch on GitHub already. That's the case when
-    // there is an existing Pull Request, and its base is not the master branch.
-    let base_branch = if let Some(ref pr) = pull_request {
-        if pr.base.is_master_branch() {
-            None
-        } else {
-            Some(pr.base.clone())
-        }
-    } else {
-        None
-    };
+            // We are going to construct `pr_base_parent: Option<Oid>`.
+            // The value will be the commit we have to merge into the new Pull Request
+            // commit to reflect changes in the parent of the local commit (by rebasing
+            // or changing commits between master and this one, although technically
+            // that's also rebasing).
+            // If it's `None`, then we will not merge anything into the new Pull Request
+            // commit.
+            // If we are updating an existing PR, then there are three cases here:
+            // (1) the parent tree of this commit is unchanged and we do not need to
+            //     merge in master, which means that the local commit was amended, but
+            //     not rebased. We don't need to merge anything into the Pull Request
+            //     branch.
+            // (2) the parent tree has changed, but the parent of the local commit is on
+            //     master (or we are cherry-picking) and we are not already using a base
+            //     branch: in this case we can merge the master commit we are based on
+            //     into the PR branch, without going via a base branch. Thus, we don't
+            //     introduce a base branch here and the PR continues to target the
+            //     master branch.
+            // (3) the parent tree has changed, and we need to use a base branch (either
+            //     because one was already created earlier, or we find that we are not
+            //     directly based on master now): we need to construct a new commit for
+            //     the base branch. That new commit's tree is always that of that local
+            //     commit's parent (thus making sure that the difference between base
+            //     branch and pull request branch are exactly the changes made by the
+            //     local commit, thus the changes we want to have reviewed). The new
+            //     commit may have one or two parents. The previous base is always a
+            //     parent (that's either the current commit on an existing base branch,
+            //     or the previous master commit the PR was based on if there isn't a
+            //     base branch already). In addition, if the master commit this commit
+            //     is based on has changed, (i.e. the local commit got rebased on newer
+            //     master in the meantime) then we have to merge in that master commit,
+            //     which will be the second parent.
+            // If we are creating a new pull request then `pr_base_tree` (the current
+            // base of the PR) was set above to be the tree of the master commit the
+            // local commit is based one, whereas `new_base_tree` is the tree of the
+            // parent of the local commit. So if the local commit for this new PR is on
+            // master, those two are the same (and we want to apply case 1). If the
+            // commit is not directly based on master, we have to create this new PR
+            // with a base branch, so that is case 3.
 
-    // We are going to construct `pr_base_parent: Option<Oid>`.
-    // The value will be the commit we have to merge into the new Pull Request
-    // commit to reflect changes in the parent of the local commit (by rebasing
-    // or changing commits between master and this one, although technically
-    // that's also rebasing).
-    // If it's `None`, then we will not merge anything into the new Pull Request
-    // commit.
-    // If we are updating an existing PR, then there are three cases here:
-    // (1) the parent tree of this commit is unchanged and we do not need to
-    //     merge in master, which means that the local commit was amended, but
-    //     not rebased. We don't need to merge anything into the Pull Request
-    //     branch.
-    // (2) the parent tree has changed, but the parent of the local commit is on
-    //     master (or we are cherry-picking) and we are not already using a base
-    //     branch: in this case we can merge the master commit we are based on
-    //     into the PR branch, without going via a base branch. Thus, we don't
-    //     introduce a base branch here and the PR continues to target the
-    //     master branch.
-    // (3) the parent tree has changed, and we need to use a base branch (either
-    //     because one was already created earlier, or we find that we are not
-    //     directly based on master now): we need to construct a new commit for
-    //     the base branch. That new commit's tree is always that of that local
-    //     commit's parent (thus making sure that the difference between base
-    //     branch and pull request branch are exactly the changes made by the
-    //     local commit, thus the changes we want to have reviewed). The new
-    //     commit may have one or two parents. The previous base is always a
-    //     parent (that's either the current commit on an existing base branch,
-    //     or the previous master commit the PR was based on if there isn't a
-    //     base branch already). In addition, if the master commit this commit
-    //     is based on has changed, (i.e. the local commit got rebased on newer
-    //     master in the meantime) then we have to merge in that master commit,
-    //     which will be the second parent.
-    // If we are creating a new pull request then `pr_base_tree` (the current
-    // base of the PR) was set above to be the tree of the master commit the
-    // local commit is based one, whereas `new_base_tree` is the tree of the
-    // parent of the local commit. So if the local commit for this new PR is on
-    // master, those two are the same (and we want to apply case 1). If the
-    // commit is not directly based on master, we have to create this new PR
-    // with a base branch, so that is case 3.
+            let (pr_base_parent, base_branch) = if pr_base_tree == new_base_tree
+                && !needs_merging_master
+            {
+                // Case 1
+                (None, base_branch)
+            } else if base_branch.is_none() && (directly_based_on_master || effective_cherry_pick) {
+                // Case 2
+                (Some(master_base_oid), None)
+            } else {
+                // Case 3
 
-    let (pr_base_parent, base_branch) = if pr_base_tree == new_base_tree && !needs_merging_master {
-        // Case 1
-        (None, base_branch)
-    } else if base_branch.is_none() && (directly_based_on_master || effective_cherry_pick) {
-        // Case 2
-        (Some(master_base_oid), None)
-    } else {
-        // Case 3
+                // We are constructing a base branch commit.
+                // One parent of the new base branch commit will be the current base
+                // commit, that could be either the top commit of an existing base
+                // branch, or a commit on master.
+                let mut parents = vec![pr_base_oid];
 
-        // We are constructing a base branch commit.
-        // One parent of the new base branch commit will be the current base
-        // commit, that could be either the top commit of an existing base
-        // branch, or a commit on master.
-        let mut parents = vec![pr_base_oid];
+                // If we need to rebase on master, make the master commit also a
+                // parent (except if the first parent is that same commit, we don't
+                // want duplicates in `parents`).
+                if needs_merging_master && pr_base_oid != master_base_oid {
+                    parents.push(master_base_oid);
+                }
 
-        // If we need to rebase on master, make the master commit also a
-        // parent (except if the first parent is that same commit, we don't
-        // want duplicates in `parents`).
-        if needs_merging_master && pr_base_oid != master_base_oid {
-            parents.push(master_base_oid);
-        }
+                let new_base_branch_commit = if opts.dry_run {
+                    // Use a placeholder OID — this won't be pushed
+                    pr_base_oid
+                } else {
+                    jj.create_derived_commit(
+                        local_commit.parent_oid,
+                        &format!(
+                            "[spr] {}\n\n[skip ci]",
+                            if pull_request.is_some() {
+                                "changes introduced through rebase".to_string()
+                            } else {
+                                format!(
+                                    "changes to {} this commit is based on",
+                                    config.master_ref.branch_name()
+                                )
+                            },
+                        ),
+                        new_base_tree,
+                        &parents[..],
+                    )?
+                };
 
-        let new_base_branch_commit = if opts.dry_run {
-            // Use a placeholder OID — this won't be pushed
-            pr_base_oid
-        } else {
-            jj.create_derived_commit(
-                local_commit.parent_oid,
-                &format!(
-                    "[spr] {}\n\n[skip ci]",
-                    if pull_request.is_some() {
-                        "changes introduced through rebase".to_string()
-                    } else {
-                        format!(
-                            "changes to {} this commit is based on",
-                            config.master_ref.branch_name()
-                        )
-                    },
-                ),
-                new_base_tree,
-                &parents[..],
-            )?
+                // If `base_branch` is `None` (which means a base branch does not exist
+                // yet), then make a `GitHubBranch` with a new name for a base branch
+                let base_branch = if let Some(base_branch) = base_branch {
+                    base_branch
+                } else {
+                    config.new_github_branch(
+                        &config.get_base_branch_name(&jj.get_all_ref_names()?, title),
+                    )
+                };
+
+                (Some(new_base_branch_commit), Some(base_branch))
+            };
+
+            (
+                pr_head_oid,
+                pr_base_parent,
+                pr_base_parent,
+                base_branch,
+                needs_merging_master,
+            )
         };
-
-        // If `base_branch` is `None` (which means a base branch does not exist
-        // yet), then make a `GitHubBranch` with a new name for a base branch
-        let base_branch = if let Some(base_branch) = base_branch {
-            base_branch
-        } else {
-            config.new_github_branch(&config.get_base_branch_name(&jj.get_all_ref_names()?, title))
-        };
-
-        (Some(new_base_branch_commit), Some(base_branch))
-    };
 
     let mut github_commit_message = opts.message.clone();
     if pull_request.is_some() && github_commit_message.is_none() && !opts.dry_run {
@@ -720,7 +772,7 @@ async fn diff_impl(
             if let Some(base_branch) = base_branch {
                 // We are using a base branch.
 
-                if let Some(base_branch_commit) = pr_base_parent {
+                if let Some(base_branch_commit) = base_branch_commit {
                     // ...and we prepared a new commit for it, so we need to push an
                     // update of the base branch.
                     cmd.arg(format!(
@@ -747,6 +799,12 @@ async fn diff_impl(
                 run_command(&mut cmd)
                     .await
                     .reword("git push failed".to_string())?;
+
+                // With native stacking, a Pull Request that was stacked on
+                // another one targets master once its parent has landed.
+                if !pull_request.base.is_master_branch() {
+                    pull_request_updates.base = Some(config.master_ref.branch_name().to_string());
+                }
             }
 
             if !pull_request_updates.is_empty() {
@@ -757,7 +815,9 @@ async fn diff_impl(
             // We are creating a new Pull Request.
 
             // If there's a base branch, add it to the push
-            if let (Some(base_branch), Some(base_branch_commit)) = (&base_branch, pr_base_parent) {
+            if let (Some(base_branch), Some(base_branch_commit)) =
+                (&base_branch, base_branch_commit)
+            {
                 cmd.arg(format!(
                     "{}:{}",
                     base_branch_commit,
@@ -809,6 +869,135 @@ async fn diff_impl(
                 }
             }
         }
+    }
+
+    Ok(Some((pull_request_branch, pr_commit)))
+}
+
+/// The branch a Pull Request targets with native stacking, and the commit at
+/// its tip. That commit has to be an ancestor of the Pull Request head so
+/// that GitHub shows only the changes of the local commit.
+struct NativeBase {
+    branch: GitHubBranch,
+    oid: Oid,
+}
+
+/// Find what a Pull Request for a commit with the given parent should target
+/// with native stacking: master if the commit is based on master, otherwise
+/// the head branch of the Pull Request for the parent commit.
+async fn resolve_native_base(
+    jj: &crate::jj::Jujutsu,
+    gh: &GitHub,
+    config: &crate::config::Config,
+    parent_oid: Oid,
+    master_base_oid: Oid,
+    based_on_master: bool,
+    stack_heads: &HashMap<Oid, (GitHubBranch, Oid)>,
+) -> Result<NativeBase> {
+    if based_on_master {
+        return Ok(NativeBase {
+            branch: config.master_ref.clone(),
+            oid: master_base_oid,
+        });
+    }
+
+    // The parent was handled earlier in this run, so its Pull Request branch
+    // is up to date.
+    if let Some((branch, oid)) = stack_heads.get(&parent_oid) {
+        return Ok(NativeBase {
+            branch: branch.clone(),
+            oid: *oid,
+        });
+    }
+
+    let parent = jj.prepare_commit(config, parent_oid)?;
+    let number = parent.pull_request_number.ok_or_else(|| {
+        Error::new(formatdoc!(
+            "The parent commit {parent} does not have a Pull Request yet. \
+             Submit it first (for example with `jj spr diff --all`), or use \
+             --cherry-pick to base this Pull Request on {master}.",
+            parent = parent.short_id,
+            master = config.master_ref.branch_name(),
+        ))
+    })?;
+
+    let pull_request = gh.clone().get_pull_request(number).await?;
+
+    if pull_request.state != PullRequestState::Open {
+        return Err(Error::new(formatdoc!(
+            "Pull Request #{number} for the parent commit {parent} is closed. \
+             Rebase this commit onto {master} first.",
+            parent = parent.short_id,
+            master = config.master_ref.branch_name(),
+        )));
+    }
+
+    if jj.get_tree_oid_for_commit(pull_request.head_oid)?
+        != jj.get_tree_oid_for_commit(parent_oid)?
+    {
+        return Err(Error::new(formatdoc!(
+            "Pull Request #{number} for the parent commit {parent} is out of \
+             date. Update it first (for example with `jj spr diff --all`).",
+            parent = parent.short_id,
+        )));
+    }
+
+    Ok(NativeBase {
+        branch: pull_request.head,
+        oid: pull_request.head_oid,
+    })
+}
+
+/// Handle a Pull Request whose head already has the right content: update
+/// its title and description if requested, and its base branch if
+/// `new_base` differs from the current one.
+async fn finish_without_new_commit(
+    opts: &DiffOptions,
+    gh: &GitHub,
+    pull_request: &PullRequest,
+    message: &MessageSectionsMap,
+    new_base: Option<&GitHubBranch>,
+) -> Result<()> {
+    let mut pull_request_updates: PullRequestUpdate = Default::default();
+
+    if opts.update_message {
+        // The user requested to update the commit message on GitHub
+        pull_request_updates.update_message(pull_request, message);
+    }
+    let message_updated = !pull_request_updates.is_empty();
+
+    let retarget = new_base.filter(|base| base.branch_name() != pull_request.base.branch_name());
+    if let Some(base) = retarget {
+        pull_request_updates.base = Some(base.branch_name().to_string());
+    }
+
+    if retarget.is_none() {
+        output("✅", "No update necessary")?;
+    }
+
+    if pull_request_updates.is_empty() {
+        return Ok(());
+    }
+
+    if opts.dry_run {
+        output(
+            "  ",
+            &format!("Would update PR #{} on GitHub", pull_request.number),
+        )?;
+        return Ok(());
+    }
+
+    gh.update_pull_request(pull_request.number, pull_request_updates)
+        .await?;
+
+    if let Some(base) = retarget {
+        output(
+            "🎯",
+            &format!("Changed base branch to {}", base.branch_name()),
+        )?;
+    }
+    if message_updated {
+        output("✍", "Updated commit message on GitHub")?;
     }
 
     Ok(())
@@ -1135,6 +1324,129 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// Run a `jj` command in `repo_path`, panicking if it fails.
+    fn run_jj(repo_path: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("jj")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .expect("Failed to run jj");
+        assert!(
+            output.status.success(),
+            "jj {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Create a jj repository with two commits, a base and a parent commit
+    /// without a Pull Request, and return their ids.
+    fn create_stacked_jj_repo() -> (TempDir, crate::jj::Jujutsu, Oid, Oid) {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let repo_path = temp_dir.path();
+
+        run_jj(repo_path, &["git", "init", "--colocate"]);
+        run_jj(
+            repo_path,
+            &["config", "set", "--repo", "user.name", "Test User"],
+        );
+        run_jj(
+            repo_path,
+            &["config", "set", "--repo", "user.email", "test@example.com"],
+        );
+
+        fs::write(repo_path.join("base.txt"), "base").unwrap();
+        run_jj(repo_path, &["commit", "-m", "Base commit"]);
+        fs::write(repo_path.join("parent.txt"), "parent").unwrap();
+        run_jj(repo_path, &["commit", "-m", "Parent commit"]);
+
+        let jj = crate::jj::Jujutsu::new(repo_path.to_path_buf()).expect("Failed to open repo");
+        let (base_oid, parent_oid) = {
+            // In a colocated repo, Git's HEAD is the parent of the working copy
+            let parent = jj.git_repo.head().unwrap().peel_to_commit().unwrap();
+            (parent.parent(0).unwrap().id(), parent.id())
+        };
+
+        (temp_dir, jj, base_oid, parent_oid)
+    }
+
+    fn create_test_github(config: &crate::config::Config, jj: &crate::jj::Jujutsu) -> GitHub {
+        GitHub::new(
+            config.clone(),
+            jj.git_repo.path().to_owned(),
+            reqwest::Client::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_native_base_based_on_master() {
+        let (_temp_dir, jj, base_oid, parent_oid) = create_stacked_jj_repo();
+        let config = create_test_config().with_stack_style(StackStyle::Native);
+        let gh = create_test_github(&config, &jj);
+
+        let base = resolve_native_base(
+            &jj,
+            &gh,
+            &config,
+            parent_oid,
+            base_oid,
+            true,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(base.branch.is_master_branch());
+        assert_eq!(base.oid, base_oid);
+    }
+
+    #[tokio::test]
+    async fn test_native_base_uses_parent_pushed_in_same_run() {
+        let (_temp_dir, jj, base_oid, parent_oid) = create_stacked_jj_repo();
+        let config = create_test_config().with_stack_style(StackStyle::Native);
+        let gh = create_test_github(&config, &jj);
+
+        let parent_branch = config.new_github_branch("spr/test/parent");
+        let parent_head = Oid::from_str("1234567890123456789012345678901234567890").unwrap();
+        let stack_heads = HashMap::from([(parent_oid, (parent_branch, parent_head))]);
+
+        let base =
+            resolve_native_base(&jj, &gh, &config, parent_oid, base_oid, false, &stack_heads)
+                .await
+                .unwrap();
+
+        assert_eq!(base.branch.branch_name(), "spr/test/parent");
+        assert!(!base.branch.is_master_branch());
+        assert_eq!(base.oid, parent_head);
+    }
+
+    #[tokio::test]
+    async fn test_native_base_requires_parent_pull_request() {
+        let (_temp_dir, jj, base_oid, parent_oid) = create_stacked_jj_repo();
+        let config = create_test_config().with_stack_style(StackStyle::Native);
+        let gh = create_test_github(&config, &jj);
+
+        let result = resolve_native_base(
+            &jj,
+            &gh,
+            &config,
+            parent_oid,
+            base_oid,
+            false,
+            &HashMap::new(),
+        )
+        .await;
+
+        let error = result.err().expect("expected an error");
+        assert!(
+            error
+                .messages()
+                .iter()
+                .any(|m| m.contains("does not have a Pull Request yet")),
+            "unexpected error: {:?}",
+            error.messages()
+        );
     }
 
     // Integration tests would require more complex setup with actual Git repositories

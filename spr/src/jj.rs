@@ -270,7 +270,7 @@ impl Jujutsu {
         Ok(())
     }
 
-    fn prepare_commit(&self, config: &Config, commit_oid: Oid) -> Result<PreparedCommit> {
+    pub fn prepare_commit(&self, config: &Config, commit_oid: Oid) -> Result<PreparedCommit> {
         let commit = self.git_repo.find_commit(commit_oid)?;
         let short_id = format!("{:.7}", commit_oid);
 

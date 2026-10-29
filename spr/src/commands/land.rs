@@ -95,6 +95,20 @@ pub async fn land(
     // For now, we'll trust GitHub's merge validation and skip local validation
     let base_is_master = pull_request.base.is_master_branch();
 
+    // A Pull Request stacked natively on another one (i.e. its base branch is
+    // the head branch of an open Pull Request) can only land after that one.
+    if !base_is_master {
+        let parents = gh
+            .get_open_pull_requests_with_head(&pull_request.base)
+            .await?;
+        if let Some(parent) = parents.first() {
+            return Err(Error::new(formatdoc!(
+                "This Pull Request is stacked on Pull Request #{parent}, which \
+                 has to land first."
+            )));
+        }
+    }
+
     // Skip local cherry-pick validation for Jujutsu workflow
     // GitHub will validate mergeability during the merge process
     let merge_matches_cherrypick = true;
@@ -265,6 +279,30 @@ pub async fn land(
     };
 
     output("🛬", "Landed!")?;
+
+    // Pull Requests stacked natively on the one we just landed target its head
+    // branch. Point them at master before that branch is deleted, as GitHub
+    // closes Pull Requests whose base branch disappears.
+    let children = gh
+        .get_open_pull_requests_with_base(&pull_request.head)
+        .await?;
+    for child in children {
+        gh.update_pull_request(
+            child,
+            PullRequestUpdate {
+                base: Some(config.master_ref.branch_name().to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        output(
+            "🎯",
+            &format!(
+                "Pull Request #{child} now targets {} (rebase it and run `jj spr diff` to update it)",
+                config.master_ref.branch_name()
+            ),
+        )?;
+    }
 
     let mut remove_old_branch_child_process = jj
         .git_command()
